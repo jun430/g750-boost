@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>G750 Boost</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header><h1>G750 <b>Boost</b></h1><span class="badge" id="sBadge">GPU Floor</span></header>
+  <div class="card status">
+    <div class="row"><span>平台</span><b id="sPlatform">--</b></div>
+    <div class="row"><span>实际地板</span><b id="sLiveFloor">-- MHz</b></div>
+    <div class="row"><span>目标档位</span><b id="sFloor">-- MHz</b></div>
+    <div class="row"><span>当前频率</span><b id="sCur">-- MHz</b></div>
+    <div class="row"><span>实际上限</span><b id="sMax">-- MHz</b></div>
+    <div class="row"><span>游戏状态</span><b id="sGame">--</b></div>
+    <div class="row"><span>温度</span><b id="sTemp">-- °C</b></div>
+  </div>
+  <div class="card">
+    <div class="loghead"><span>游戏地板档位</span></div>
+    <div class="row" style="border:none">
+      <span>目标频率</span>
+      <select id="selFloor"></select>
+    </div>
+    <button id="btnSave" class="btn">保存档位</button>
+    <div class="hint" id="saveHint"></div>
+  </div>
+  <button id="btnRefresh" class="btn">刷新状态</button>
+  <div class="card">
+    <div class="loghead">
+      <span>运行日志</span>
+      <button id="btnLog" class="mini">刷新日志</button>
+    </div>
+    <pre id="logView" class="logview">加载中...</pre>
+  </div>
+  <footer>G750 Boost v2.0.0 · 三平台自适配 · 档位接管</footer>
+</div>
+<script src="main.js"></script>
+</body>
+</html>
