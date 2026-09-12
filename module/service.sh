@@ -1,6 +1,7 @@
 #!/system/bin/sh
-# G750 Boost service.sh v2.0.0
+# G750 Boost service.sh v2.1.0
 # - 游戏地板档位接管（min_pwrlevel 主通道 / min_freq 回退通道）
+# - 上限档位（max_pwrlevel）常驻保护，防止其他模块/应用拉低
 # - 平台自适配: SM8650 / SM8750 / SM8850（运行时探测，不硬编码）
 # - 游戏运行期间每 5s 只读校验，偏离才重写（最小开销）
 # - 退出 / 禁用 / 卸载 / 异常退出均恢复系统默认档位
@@ -13,6 +14,7 @@ STATE_DIR=$MODDIR/state
 CONFIG=$MODDIR/config/settings.conf
 
 DEFAULT_FLOOR=680
+DEFAULT_CEIL=0
 POLL=5
 HYSTERESIS=8
 
@@ -20,6 +22,7 @@ MONITOR_PID=""
 SLEEP_PID=""
 STATE=idle
 ORIG_LEVEL=""
+ORIG_MAXLEVEL=""
 LAST_SEEN_GAME=0
 
 . "$MODDIR/lib/platform.sh"
@@ -27,23 +30,58 @@ LAST_SEEN_GAME=0
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $1" >> "$LOG" 2>/dev/null; }
 
-# ---- 配置读取（容错：非法值回退默认） ----
+# ---- 配置读取（容错：非法值回退默认；模式感知） ----
+default_floor() {
+  if [ "$GB_LIST_SRC" = "level" ]; then
+    echo "${GB_LEVEL_MAX:-0}"
+  else
+    echo "$DEFAULT_FLOOR"
+  fi
+}
+
 cfg_floor() {
   v=$(grep '^game_floor_mhz=' "$CONFIG" 2>/dev/null | tail -n 1 | cut -d= -f2)
   case "$v" in
-    ''|*[!0-9]*) echo "$DEFAULT_FLOOR" ;;
-    *) if [ "$v" -ge 100 ] && [ "$v" -le 2000 ]; then echo "$v"; else echo "$DEFAULT_FLOOR"; fi ;;
+    ''|*[!0-9]*) default_floor; return ;;
+  esac
+  if [ "$GB_LIST_SRC" = "level" ]; then
+    if [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ]; then echo "$v"; else default_floor; fi
+  else
+    if [ "$v" -ge 100 ] && [ "$v" -le 2000 ]; then echo "$v"; else echo "$DEFAULT_FLOOR"; fi
+  fi
+}
+
+# 上限目标；0 或非法值 = 不限制（运行时按最高档解析）
+cfg_ceil() {
+  v=$(grep '^game_ceil_mhz=' "$CONFIG" 2>/dev/null | tail -n 1 | cut -d= -f2)
+  case "$v" in
+    ''|*[!0-9]*) echo "$DEFAULT_CEIL" ;;
+    *)
+      if [ "$GB_LIST_SRC" = "level" ]; then
+        if [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ]; then echo "$v"; else echo "$DEFAULT_CEIL"; fi
+      else
+        if [ "$v" -eq 0 ]; then echo 0; elif [ "$v" -ge 100 ] && [ "$v" -le 3000 ]; then echo "$v"; else echo "$DEFAULT_CEIL"; fi
+      fi
+      ;;
   esac
 }
 
-# ---- 恢复系统默认档位（幂等） ----
+# ---- 恢复系统默认档位（幂等，含上限） ----
 restore_orig() {
-  [ "$GB_GPU_MODE" = "pwrlevel" ] || return 0
-  [ -n "$ORIG_LEVEL" ] || return 0
-  cur=$(gb_read_pwrlevel)
-  [ "$cur" = "$ORIG_LEVEL" ] && return 0
-  gb_write_pwrlevel "$ORIG_LEVEL"
-  log "restore pwrlevel $cur -> $ORIG_LEVEL"
+  if [ "$GB_GPU_MODE" = "pwrlevel" ] && [ -n "$ORIG_LEVEL" ]; then
+    cur=$(gb_read_pwrlevel)
+    if [ "$cur" != "$ORIG_LEVEL" ]; then
+      gb_write_pwrlevel "$ORIG_LEVEL"
+      log "restore pwrlevel $cur -> $ORIG_LEVEL"
+    fi
+  fi
+  if [ -n "$ORIG_MAXLEVEL" ]; then
+    cm=$(gb_read_maxlevel)
+    if [ "$cm" != "$ORIG_MAXLEVEL" ]; then
+      gb_write_maxlevel "$ORIG_MAXLEVEL"
+      log "restore max_pwrlevel $cm -> $ORIG_MAXLEVEL"
+    fi
+  fi
 }
 
 cleanup() {
@@ -126,7 +164,7 @@ discover_existing_games() {
 }
 
 # ================= 启动 =================
-log "=== g750-boost v2.0.0 start pid=$$ ==="
+log "=== g750-boost v2.1.0 start pid=$$ ==="
 
 gb_platform_detect
 gb_gpu_probe
@@ -172,6 +210,13 @@ esac
 ORIG_LEVEL=$((NUM_LEVELS - 1))
 echo "$ORIG_LEVEL" > "$STATE_DIR/orig_level"
 
+# 记录原始上限档位（系统默认通常为 0 = 最高）
+ORIG_MAXLEVEL=$(gb_read_maxlevel)
+case "$ORIG_MAXLEVEL" in
+  ''|*[!0-9]*) ORIG_MAXLEVEL=0 ;;
+esac
+echo "$ORIG_MAXLEVEL" > "$STATE_DIR/orig_maxlevel"
+
 # 清理上次异常退出的残留
 if [ "$GB_GPU_MODE" = "pwrlevel" ]; then
   cur_pw=$(gb_read_pwrlevel)
@@ -215,9 +260,43 @@ while :; do
   case "$out_lvl" in
     ''|*[!0-9]*) out_lvl=$ORIG_LEVEL; out_mhz=$(gb_level_to_mhz "$out_lvl") ;;
   esac
-  # 状态缓存：每轮更新（空闲时也显示当前配置的目标档位）
+
+  # 上限档位（0/空 = 不限制，取最高档）
+  ceil_mhz=$(cfg_ceil)
+  top_mhz=$(gb_top_display)
+  if [ -z "$ceil_mhz" ] || [ "$ceil_mhz" -le 0 ]; then
+    ceil_lvl=0
+    ceil_mhz=$top_mhz
+  else
+    set -- $(gb_map_ceil "$ceil_mhz")
+    ceil_lvl=$1
+    ceil_mhz=$2
+  fi
+  case "$ceil_lvl" in
+    ''|*[!0-9]*) ceil_lvl=0 ;;
+  esac
+  # 地板不能高于上限（pwrlevel 数字越小频率越高，故地板档位号须 >= 上限档位号）
+  if [ "$out_lvl" -lt "$ceil_lvl" ]; then
+    out_lvl=$ceil_lvl
+    out_mhz=$(gb_level_to_mhz "$out_lvl")
+  fi
+
+  # 状态缓存：每轮更新（空闲时也显示当前配置的目标档位 / 上限）
   echo "$out_lvl" > "$STATE_DIR/floor_level"
   echo "$out_mhz" > "$STATE_DIR/floor_mhz"
+  echo "$ceil_lvl" > "$STATE_DIR/ceil_level"
+  echo "$ceil_mhz" > "$STATE_DIR/ceil_mhz"
+
+  # 上限保护：每轮写回设定上限，防止其他模块/应用拉低（把 max_pwrlevel 改大）
+  if [ "$GB_GPU_MODE" = "pwrlevel" ]; then
+    cur_max=$(gb_read_maxlevel)
+    if [ "$cur_max" != "$ceil_lvl" ]; then
+      gb_write_maxlevel "$ceil_lvl"
+      log "ceil protect max_pwrlevel $cur_max -> $ceil_lvl (${ceil_mhz}MHz)"
+    fi
+  else
+    gb_write_maxfreq "$((ceil_mhz * 1000000))"
+  fi
 
   now=$(date +%s)
   is_game=0

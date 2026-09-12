@@ -3,26 +3,43 @@ ui_print "- G750 Boost v2.0.0"
 ui_print "- Snapdragon GPU floor booster (min_pwrlevel)"
 ui_print " "
 
-# ============ 处理器识别（仅识别处理器，不识别品牌/系统） ============
+# ============ 处理器识别（GPU 优先，多判据交叉） ============
 # 依据：骁龙 GPU 控制接口由高通 KGSL 驱动提供，跨品牌完全一致
 #       （一加/OPPO/真我/小米等骁龙机型节点均为 /sys/class/kgsl/kgsl-3d0/min_pwrlevel）
-# 因此只需判断处理器型号，无需区分系统或品牌。
+# 判据顺序：GPU 硬件型号 > ro.soc.model > ro.board.platform
+#   —— 厂商 ROM 的 ro.soc.model 命名可能不准（8e5 被写成 SM8750），故 GPU 型号优先
 SOC=$(getprop ro.soc.model 2>/dev/null)
 BP=$(getprop ro.board.platform 2>/dev/null)
-case "$SOC" in
-  SM8650*) PNAME="8 Gen3 (Adreno750)"; DEF=680; SUPPORT=1 ;;
-  SM8750*) PNAME="8 Elite (Adreno830)"; DEF=680; SUPPORT=1 ;;
-  SM8850*) PNAME="8 Elite Gen5 (Adreno840)"; DEF=680; SUPPORT=1 ;;
-  *)
-    case "$BP" in
-      pineapple*) PNAME="8 Gen3 (pineapple)"; DEF=680; SUPPORT=1 ;;
-      sun*)       PNAME="8 Elite (sun)"; DEF=680; SUPPORT=1 ;;
-      canoe*)     PNAME="8 Elite Gen5 (canoe)"; DEF=680; SUPPORT=1 ;;
-      *)          PNAME="不支持 ($SOC/$BP)"; DEF=680; SUPPORT=0 ;;
-    esac
-    ;;
-esac
+GPU_MODEL=$(cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null)
+[ -z "$GPU_MODEL" ] && GPU_MODEL=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/gpu_model 2>/dev/null)
+[ -z "$GPU_MODEL" ] && GPU_MODEL=$(cat /sys/kernel/gpu/gpu_model 2>/dev/null)
 
+PNAME=""; SUPPORT=0; DEF=680
+# 判据 1: GPU 硬件型号
+case "$GPU_MODEL" in
+  *750*) PNAME="8 Gen3 (Adreno750)";       SUPPORT=1 ;;
+  *830*) PNAME="8 Elite (Adreno830)";      SUPPORT=1 ;;
+  *840*) PNAME="8 Elite Gen5 (Adreno840)"; SUPPORT=1 ;;
+esac
+# 判据 2: ro.soc.model
+if [ $SUPPORT -eq 0 ]; then
+  case "$SOC" in
+    SM8650*) PNAME="8 Gen3 (Adreno750)";       SUPPORT=1 ;;
+    SM8750*) PNAME="8 Elite (Adreno830)";      SUPPORT=1 ;;
+    SM8850*) PNAME="8 Elite Gen5 (Adreno840)"; SUPPORT=1 ;;
+  esac
+fi
+# 判据 3: board.platform 代号
+if [ $SUPPORT -eq 0 ]; then
+  case "$BP" in
+    pineapple*) PNAME="8 Gen3 (pineapple)";       SUPPORT=1 ;;
+    canoe*)     PNAME="8 Elite Gen5 (canoe)";     SUPPORT=1 ;;
+    sun*)       PNAME="8 Elite (sun)";            SUPPORT=1 ;;
+  esac
+fi
+[ $SUPPORT -eq 0 ] && PNAME="不支持 ($SOC / $BP / gpu=$GPU_MODEL)"
+
+ui_print "- GPU 型号: ${GPU_MODEL:-未读取到}"
 ui_print "- 当前处理器: $PNAME"
 if [ $SUPPORT -eq 0 ]; then
   ui_print "! 仅支持 SM8650 / SM8750 / SM8850"
@@ -31,15 +48,16 @@ if [ $SUPPORT -eq 0 ]; then
 fi
 ui_print "- 默认目标档位: ${DEF}MHz（安装后可在 WebUI 修改）"
 
-# ============ GPU 节点探测 ============
-if [ ! -e /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]; then
-  ui_print "! 未检测到 KGSL GPU 节点，设备不兼容"
-  abort "! 缺少 /sys/class/kgsl/kgsl-3d0 节点"
-fi
+# ============ GPU 节点探测（宽松：缺失只警告，不中断） ============
+# 安装环境可能看不到 /sys 节点，或 8e5 等新平台节点路径不同
+# 这里只做提示，真正判定放到开机后运行时自适应
 if [ -e /sys/class/kgsl/kgsl-3d0/min_pwrlevel ]; then
   ui_print "- 主通道 min_pwrlevel: 可用"
-else
+elif [ -e /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ]; then
   ui_print "- 主通道 min_pwrlevel: 不可用，将自动回退 min_freq 模式"
+else
+  ui_print "! 安装环境未检测到 KGSL 节点（可能安装环境受限或平台路径不同）"
+  ui_print "! 已继续安装；开机后由运行时引擎自动重新探测"
 fi
 
 # ============ 音量键确认 ============
@@ -72,7 +90,9 @@ mkdir -p "$MODPATH/config"
 printf '%s\n' \
   "# g750-boost settings" \
   "# 游戏地板目标频率 (MHz)，WebUI 可改" \
-  "game_floor_mhz=$DEF" > "$MODPATH/config/settings.conf"
+  "game_floor_mhz=$DEF" \
+  "# 游戏上限目标频率 (MHz)，0=不限制（最高档）" \
+  "game_ceil_mhz=0" > "$MODPATH/config/settings.conf"
 
 # ============ 权限 ============
 set_perm_recursive "$MODPATH" 0 0 0755 0644

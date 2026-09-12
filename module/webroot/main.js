@@ -55,6 +55,7 @@ async function refreshStatus({ silent = true } = {}) {
     $("#sPlatform").textContent = j.platform || "--";
     $("#sLiveFloor").textContent = fmtMHz(j.live_floor);
     $("#sFloor").textContent = fmtMHz(j.floor_mhz);
+    $("#sCeil").textContent = fmtMHz(j.ceil_mhz);
     $("#sCur").textContent = fmtMHz(j.cur);
     $("#sMax").textContent = fmtMHz(j.max);
     if (j.game === "yes") {
@@ -69,34 +70,58 @@ async function refreshStatus({ silent = true } = {}) {
   } catch (e) { if (!silent) toast("刷新失败: " + e.message); }
 }
 
+let LIST_UNIT = "MHz";
+const labelVal = (v) => (LIST_UNIT === "MHz" ? (v + " MHz") : ("档位 " + v));
+
 async function loadConfig() {
   try {
     const j = JSON.parse(await (await sh("sh __MODPATH__/cgi/config.sh")).stdout);
+    const list = Array.isArray(j.list) ? j.list : [];
+    LIST_UNIT = j.unit || "MHz";
     const sel = $("#selFloor");
-    if (sel && Array.isArray(j.freqs) && j.freqs.length) {
+    const selC = $("#selCeil");
+    if (sel && list.length) {
       sel.innerHTML = "";
-      for (const f of j.freqs) {
+      for (const v of list) {
         const o = document.createElement("option");
-        o.value = f;
-        o.textContent = f + " MHz";
-        if (f == j.floor) o.selected = true;
+        o.value = v;
+        o.textContent = labelVal(v);
+        if (v == j.floor) o.selected = true;
         sel.appendChild(o);
       }
-      $("#saveHint").textContent = "当前目标：" + j.floor + " MHz";
     }
+    if (selC && list.length) {
+      selC.innerHTML = "";
+      const oTop = document.createElement("option");
+      oTop.value = 0;
+      oTop.textContent = "不限制（最高 " + labelVal(list[0]) + "）";
+      if (!j.ceil || j.ceil == 0) oTop.selected = true;
+      selC.appendChild(oTop);
+      for (const v of list) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = labelVal(v);
+        if (j.ceil && j.ceil == v) o.selected = true;
+        selC.appendChild(o);
+      }
+    }
+    if (sel) $("#saveHint").textContent = "当前地板 " + labelVal(j.floor) + " · 上限 " + ((!j.ceil || j.ceil == 0) ? "不限制" : labelVal(j.ceil));
   } catch (e) { console.log("loadConfig failed: " + e); }
 }
 
-async function saveFloor() {
-  const sel = $("#selFloor");
-  if (!sel) return;
-  const val = sel.value;
-  const r = await sh("sh __MODPATH__/cgi/config.sh save " + val);
-  let ok = false, floor = val;
-  try { const j = JSON.parse(r.stdout); ok = !!j.ok; floor = j.floor || val; } catch (e) {}
+async function saveCfg() {
+  const selF = $("#selFloor");
+  const selC = $("#selCeil");
+  if (!selF) return;
+  const floor = selF.value;
+  const ceil = selC ? selC.value : 0;
+  const r = await sh("sh __MODPATH__/cgi/config.sh save " + floor + " " + ceil);
+  let ok = false, f = floor, c = ceil;
+  try { const j = JSON.parse(r.stdout); ok = !!j.ok; f = j.floor || floor; c = (j.ceil === undefined ? ceil : j.ceil); } catch (e) {}
   if (ok) {
-    $("#saveHint").textContent = "已保存目标档位 " + floor + " MHz（5 秒内生效）";
-    toast("已保存 " + floor + " MHz");
+    const ceilTxt = (!c || c == 0) ? "不限制" : labelVal(c);
+    $("#saveHint").textContent = "已保存 地板 " + labelVal(f) + " · 上限 " + ceilTxt + "（5 秒内生效）";
+    toast("已保存 地板" + labelVal(f) + " / 上限" + ceilTxt);
   } else {
     $("#saveHint").textContent = "保存失败，请重试";
     toast("保存失败");
@@ -114,7 +139,7 @@ async function refreshLog() {
 }
 
 $("#btnRefresh").addEventListener("click", () => { refreshStatus({ silent: false }); refreshLog(); });
-$("#btnSave").addEventListener("click", saveFloor);
+$("#btnSave").addEventListener("click", saveCfg);
 $("#btnLog").addEventListener("click", refreshLog);
 setInterval(() => { if (!document.hidden) { refreshStatus({ silent: true }); refreshLog(); } }, 4000);
 if (!HAS_KSU) {
