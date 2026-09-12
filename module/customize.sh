@@ -3,7 +3,10 @@ ui_print "- G750 Boost v2.0.0"
 ui_print "- Snapdragon GPU floor booster (min_pwrlevel)"
 ui_print " "
 
-# ============ 平台识别（区分安装） ============
+# ============ 处理器识别（仅识别处理器，不识别品牌/系统） ============
+# 依据：骁龙 GPU 控制接口由高通 KGSL 驱动提供，跨品牌完全一致
+#       （一加/OPPO/真我/小米等骁龙机型节点均为 /sys/class/kgsl/kgsl-3d0/min_pwrlevel）
+# 因此只需判断处理器型号，无需区分系统或品牌。
 SOC=$(getprop ro.soc.model 2>/dev/null)
 BP=$(getprop ro.board.platform 2>/dev/null)
 case "$SOC" in
@@ -15,28 +18,28 @@ case "$SOC" in
       pineapple*) PNAME="8 Gen3 (pineapple)"; DEF=680; SUPPORT=1 ;;
       sun*)       PNAME="8 Elite (sun)"; DEF=680; SUPPORT=1 ;;
       canoe*)     PNAME="8 Elite Gen5 (canoe)"; DEF=680; SUPPORT=1 ;;
-      *)          PNAME="未知 ($SOC/$BP)"; DEF=680; SUPPORT=0 ;;
+      *)          PNAME="不支持 ($SOC/$BP)"; DEF=680; SUPPORT=0 ;;
     esac
     ;;
 esac
 
-ui_print "- 当前平台: $PNAME"
+ui_print "- 当前处理器: $PNAME"
 if [ $SUPPORT -eq 0 ]; then
-  ui_print "! 未适配平台：安装后进入安全模式（不写入 GPU）"
-else
-  ui_print "- 默认目标档位: ${DEF}MHz（安装后可在 WebUI 修改）"
+  ui_print "! 仅支持 SM8650 / SM8750 / SM8850"
+  ui_print "! 当前处理器不在支持范围，拒绝安装"
+  abort "! 不支持的处理器平台"
 fi
+ui_print "- 默认目标档位: ${DEF}MHz（安装后可在 WebUI 修改）"
 
 # ============ GPU 节点探测 ============
 if [ ! -e /sys/class/kgsl/kgsl-3d0/devfreq/available_frequencies ]; then
-  ui_print "! 警告: 未检测到 KGSL devfreq 节点，可能与设备不兼容"
-  ui_print "! 继续安装（安全模式下不会写入 GPU）"
+  ui_print "! 未检测到 KGSL GPU 节点，设备不兼容"
+  abort "! 缺少 /sys/class/kgsl/kgsl-3d0 节点"
+fi
+if [ -e /sys/class/kgsl/kgsl-3d0/min_pwrlevel ]; then
+  ui_print "- 主通道 min_pwrlevel: 可用"
 else
-  if [ -e /sys/class/kgsl/kgsl-3d0/min_pwrlevel ]; then
-    ui_print "- 主通道 min_pwrlevel: 可用"
-  else
-    ui_print "- 主通道 min_pwrlevel: 不可用，将自动回退 min_freq 模式"
-  fi
+  ui_print "- 主通道 min_pwrlevel: 不可用，将自动回退 min_freq 模式"
 fi
 
 # ============ 音量键确认 ============
