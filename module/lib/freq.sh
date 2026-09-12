@@ -156,8 +156,10 @@ gb_top_display() {
   echo $((first / 1000000))
 }
 
-# 写 min_pwrlevel
+# 写 min_pwrlevel（节点不存在直接返回 —— 防止空变量展开成 /min_pwrlevel）
 gb_write_pwrlevel() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/min_pwrlevel" ] || return 1
   lvl=$1
   chmod 644 "$GB_GPU_CLASS/min_pwrlevel" 2>/dev/null
   echo "$lvl" > "$GB_GPU_CLASS/min_pwrlevel" 2>/dev/null
@@ -165,11 +167,14 @@ gb_write_pwrlevel() {
 
 # 读 min_pwrlevel
 gb_read_pwrlevel() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
   cat "$GB_GPU_CLASS/min_pwrlevel" 2>/dev/null
 }
 
-# 写 max_pwrlevel
+# 写 max_pwrlevel（节点不存在直接返回）
 gb_write_maxlevel() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/max_pwrlevel" ] || return 1
   lvl=$1
   chmod 644 "$GB_GPU_CLASS/max_pwrlevel" 2>/dev/null
   echo "$lvl" > "$GB_GPU_CLASS/max_pwrlevel" 2>/dev/null
@@ -177,11 +182,15 @@ gb_write_maxlevel() {
 
 # 读 max_pwrlevel
 gb_read_maxlevel() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
   cat "$GB_GPU_CLASS/max_pwrlevel" 2>/dev/null
 }
 
 # 回退通道: 写 devfreq/min_freq
+#   8e5 无 devfreq 节点（GB_DF 为空）→ 直接返回，避免误写根目录 /min_freq
 gb_write_minfreq() {
+  [ -n "$GB_DF" ] || return 1
+  [ -f "$GB_DF/min_freq" ] || return 1
   freq=$1
   chmod 644 "$GB_DF/min_freq" 2>/dev/null
   echo "$freq" > "$GB_DF/min_freq" 2>/dev/null
@@ -189,7 +198,33 @@ gb_write_minfreq() {
 
 # 回退通道: 写 devfreq/max_freq
 gb_write_maxfreq() {
+  [ -n "$GB_DF" ] || return 1
+  [ -f "$GB_DF/max_freq" ] || return 1
   freq=$1
   chmod 644 "$GB_DF/max_freq" 2>/dev/null
   echo "$freq" > "$GB_DF/max_freq" 2>/dev/null
+}
+
+# ---- 第三通道: /sys/kernel/gpu（MHz 单位；msm_perf / 性能工具常用）----
+#   8g3 / 8e / 8e5 均存在；节点不存在时静默跳过
+gb_write_gpumin() {
+  [ -n "$GB_GPU_KERNEL" ] || return 1
+  [ -f "$GB_GPU_KERNEL/gpu_min_clock" ] || return 1
+  chmod 644 "$GB_GPU_KERNEL/gpu_min_clock" 2>/dev/null
+  echo "$1" > "$GB_GPU_KERNEL/gpu_min_clock" 2>/dev/null
+}
+
+gb_read_gpumin() {
+  [ -n "$GB_GPU_KERNEL" ] && cat "$GB_GPU_KERNEL/gpu_min_clock" 2>/dev/null
+}
+
+gb_write_gpumax() {
+  [ -n "$GB_GPU_KERNEL" ] || return 1
+  [ -f "$GB_GPU_KERNEL/gpu_max_clock" ] || return 1
+  chmod 644 "$GB_GPU_KERNEL/gpu_max_clock" 2>/dev/null
+  echo "$1" > "$GB_GPU_KERNEL/gpu_max_clock" 2>/dev/null
+}
+
+gb_read_gpumax() {
+  [ -n "$GB_GPU_KERNEL" ] && cat "$GB_GPU_KERNEL/gpu_max_clock" 2>/dev/null
 }

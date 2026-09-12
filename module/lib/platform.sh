@@ -93,6 +93,11 @@ gb_gpu_probe() {
     done
   fi
 
+  # 第三套接口: /sys/kernel/gpu（msm_perf / 性能工具常用的 MHz 单位节点）
+  #   8g3 / 8e / 8e5 均存在；含 gpu_min_clock / gpu_max_clock（可写，MHz）
+  GB_GPU_KERNEL=""
+  [ -d /sys/kernel/gpu ] && GB_GPU_KERNEL=/sys/kernel/gpu
+
   # 主通道：有 min_pwrlevel 即视为档位模式（pwrlevel）
   #   能读到频率表 → 用 MHz 显示；读不到但有 num_pwrlevels → 降级为"档位号"显示
   GB_GPU_MODE=none
@@ -105,6 +110,6 @@ gb_gpu_probe() {
     GB_GPU_MODE=freq
   fi
 
-  export GB_GPU_CLASS GB_DF GB_GPU_MODE GB_FREQ_FILE
+  export GB_GPU_CLASS GB_DF GB_GPU_MODE GB_FREQ_FILE GB_GPU_KERNEL
   return 0
 }

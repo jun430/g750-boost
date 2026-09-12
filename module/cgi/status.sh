@@ -18,6 +18,22 @@ freqs=$(cat "$GB_FREQ_FILE" 2>/dev/null)
 min=$(awk '{printf "%d", $1/1000000}' "$DF/min_freq" 2>/dev/null)
 cur=$(awk '{printf "%d", $1/1000000}' "$DF/cur_freq" 2>/dev/null)
 max=$(awk '{printf "%d", $1/1000000}' "$DF/max_freq" 2>/dev/null)
+
+# 无 devfreq 平台（如 8e5）回退到 kgsl-3d0 时钟节点
+if [ -z "$cur" ]; then
+  cur=$(cat "$GPU/clock_mhz" 2>/dev/null)
+  [ -z "$cur" ] && cur=$(awk '{printf "%d", $1/1000000}' "$GPU/gpuclk" 2>/dev/null)
+fi
+if [ -z "$max" ]; then
+  _m=$(cat "$GPU/max_gpuclk" 2>/dev/null)
+  [ -n "$_m" ] && max=$((_m / 1000000))
+  [ -z "$max" ] && max=$(cat "$GPU/max_clock_mhz" 2>/dev/null)
+fi
+if [ -z "$min" ]; then
+  _m=$(cat "$GPU/min_gpuclk" 2>/dev/null)
+  [ -n "$_m" ] && min=$((_m / 1000000))
+  [ -z "$min" ] && min=$(cat "$GPU/min_clock_mhz" 2>/dev/null)
+fi
 temp=$(awk '{printf "%d", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 
 pwrlevel=$(cat "$GPU/min_pwrlevel" 2>/dev/null)

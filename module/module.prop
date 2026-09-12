@@ -1,6 +1,6 @@
 id=g750-boost
 name=G750 Boost (Game GPU Floor)
-version=v2.1.0
-versionCode=9
+version=v2.1.1
+versionCode=10
 author=雨色
-description=游戏GPU地板/上限档位模块，适配 SM8650/SM8750/SM8850（8 Gen3 / 8 Elite / 8 Elite Gen5）。游戏运行时接管 GPU 地板档位（min_pwrlevel）并在上方自动调频，上限档位（max_pwrlevel）常驻保护防止被其他模块拉低，退出自动恢复。支持 WebUI 自定义地板/上限档位 (127.0.0.1:8778)。
+description=游戏GPU地板/上限档位模块，适配 SM8650/SM8750/SM8850（8 Gen3 / 8 Elite / 8 Elite Gen5）。游戏运行时接管 GPU 地板（min_pwrlevel 主通道 + devfreq/min_freq 软下限 + /sys/kernel/gpu MHz 通道三路同步），上限（max_pwrlevel / max_gpuclk / gpu_max_clock）常驻保护防止被游戏或其他模块拉低，退出自动恢复。支持 WebUI 自定义地板/上限档位 (127.0.0.1:8778)。

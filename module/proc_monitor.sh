@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# G750 Boost proc_monitor.sh v2.0.0
+# G750 Boost proc_monitor.sh v2.1.1
 # - am_proc_start: 白名单主进程启动 -> 校验 PID -> 登记 marker
 # - am_proc_died:  白名单主进程退出 -> 记录精确退出时间（迟滞用）
 # - 事件只做"加速/记录"；真实存活判定始终由 service.sh 负责
@@ -11,6 +11,24 @@ LOG=$3
 
 [ -n "$MODDIR" ] && [ -n "$STATE_DIR" ] && [ -n "$LOG" ] || exit 1
 mkdir -p "$STATE_DIR/events"
+
+# ---- 单实例保护：已有存活实例则直接退出（防止重启累积）----
+MPIDF="$STATE_DIR/monitor.pid"
+if [ -f "$MPIDF" ]; then
+  _old=$(cat "$MPIDF" 2>/dev/null)
+  case "$_old" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$_old" != "$$" ] && [ -d "/proc/$_old" ]; then
+        exit 0
+      fi
+      ;;
+  esac
+fi
+echo $$ > "$MPIDF" 2>/dev/null
+
+# 收到 TERM/INT 立即退出
+trap 'exit 0' TERM INT
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $1" >> "$LOG" 2>/dev/null; }
 

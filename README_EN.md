@@ -1,7 +1,7 @@
 # G750 Boost — Snapdragon GPU Game Floor Module
 
 **Author**: 雨色
-**Version**: v2.0.0
+**Version**: v2.1.1
 **Supported SoCs**: SM8650 (8 Gen3 / Adreno 750) · SM8750 (8 Elite / Adreno 830) · SM8850 (8 Elite Gen5 / Adreno 840)
 **Compatible with**: KernelSU / Magisk / APatch
 
@@ -9,14 +9,14 @@
 
 ## One-line summary
 
-**While a target game is running, raise the GPU minimum frequency (floor) to your chosen level, keep the maximum frequency unchanged, and let the system governor scale freely in between. Restore the system default 8 seconds after the game exits.**
+**While a target game is running, raise the GPU minimum frequency (floor) to your chosen level, lock the maximum frequency (ceiling) so nothing can pull it down, and let the system governor scale freely in between. Restore the system default 8 seconds after the game exits.**
 
 ---
 
 ## Key concept: you set the FLOOR, not the ceiling
 
 ```text
-             Maximum frequency (untouched, e.g. 903 MHz)
+             Maximum frequency (guarded, e.g. 903 MHz)
                     ▲
                     │   ← system governor scales freely in this range
                     │       (climbs up under load)
@@ -27,13 +27,13 @@
 ```
 
 - ✅ You set the **minimum frequency (floor)**
-- ✅ Maximum frequency stays **unchanged**
+- ✅ The maximum frequency is **guarded** (no game / module can lower it)
 - ✅ The system governor scales freely **above** the floor
 
 | Scenario | Effect |
 |---|---|
 | Idle / no game | Default floor restored (~231 / 160 MHz) |
-| Game running (foreground/background/floating window) | Floor raised to target, ceiling unchanged, governor scales up automatically |
+| Game running (foreground/background/floating window) | Floor raised to target, ceiling guarded, governor scales up automatically |
 
 **No frequency is locked** — this is exactly the "auto-scale above the floor" design goal: no frame drops from downclocking, no wasted power.
 
@@ -41,55 +41,73 @@
 
 ## Why it exists
 
-Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to save power. In games this causes frame-time jitter and occasional stutters. This module raises the GPU **floor** only while a target game runs, without touching the ceiling.
+Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to save power. In games this causes frame-time jitter and occasional stutters. This module raises the GPU **floor** only while a target game runs, and guards the ceiling against vendor game stacks that rewrite it.
 
 ---
 
-## v2.0.0 highlights
+## v2.1.1 highlights
 
 | Feature | Description |
 |---|---|
-| **min_pwrlevel takeover** | Uses a lower-level KGSL pwrlevel interface; measured 13+ min with zero override (vs `min_freq` reverted within seconds) |
+| **Three-channel floor takeover** | `min_pwrlevel` (level) + `devfreq/min_freq` (Hz) + `/sys/kernel/gpu/gpu_min_clock` (MHz) written together, covering every node layout on 8g3 / 8e5 |
+| **Ceiling guard (4 nodes)** | `max_pwrlevel` / `max_gpuclk` / `/sys/kernel/gpu/gpu_max_clock` / `devfreq/max_freq` |
+| **1-second check in game** | Suppresses the vendor game stack (`opgs_daemon` etc.) that rewrites the floor |
+| **Write-back self-check** | Logs `WARN floor write rejected` if the driver drops the write |
+| **Missing nodes auto-skip** | Zero no-op writes (8e5 has no usable devfreq frequency nodes) |
+| **Monitor process-tree cleanup** | No more orphan accumulation across restarts |
+| **Empty-variable write guard** | Refuses to write when a node path is empty (prevents stray root-directory files) |
 | **Three-SoC autodetect** | SM8650 / SM8750 / SM8850, runtime-detected, no hardcoding |
-| **Per-SoC install** | Installer identifies the SoC; unsupported SoCs are rejected |
-| **WebUI configurable floor** | Dropdown built from the device's real frequency table; takes effect within 5s |
-| **Dual-event monitoring** | `am_proc_start` + `am_proc_died`, < 100 ms response, 5 s check as fallback |
-| **Minimal overhead** | Read-only check each cycle; writes only when the value drifts |
-| **Stale-state cleanup** | Recovers a floor left behind by a previous crash on startup |
-| **Automatic fallback** | Falls back to `min_freq` mode when `min_pwrlevel` is unavailable |
+| **WebUI** | Status panel / floor dropdown / ceiling dropdown / live log |
 
 ---
 
 ## How it works
 
 ```text
-  proc_monitor.sh (separate process)      service.sh (main daemon, 5s loop)
+  proc_monitor.sh (separate process)      service.sh (main daemon, poll loop)
   ┌───────────────────────────┐           ┌──────────────────────────────┐
   │ logcat -b events          │  events   │ 1. verify target PID alive    │
-  │  ├─ am_proc_start → PID    │ ────────► │ 2. game running → write level │
-  │  └─ am_proc_died  → time   │           │ 3. read-only check each cycle │
-  └───────────────────────────┘           │ 4. exit 8s → restore default  │
+  │  ├─ am_proc_start → PID    │ ────────► │ 2. game running → write floor │
+  │  └─ am_proc_died  → time   │           │ 3. 1s read-only check          │
+  └───────────────────────────┘           │ 4. guard ceiling each cycle    │
+                                          │ 5. exit 8s → restore default  │
                                           └───────────────┬──────────────┘
                                                           │
-                                          ┌───────────────▼──────────────┐
-                                          │ /sys/class/kgsl/kgsl-3d0/    │
-                                          │      min_pwrlevel            │
-                                          └──────────────────────────────┘
+                  ┌───────────────────────────────────────▼──────────────────────────┐
+                  │ /sys/class/kgsl/kgsl-3d0/min_pwrlevel      (level)                │
+                  │ /sys/class/kgsl/kgsl-3d0/devfreq/min_freq  (Hz,  8g3 only)        │
+                  │ /sys/kernel/gpu/gpu_min_clock              (MHz)                  │
+                  └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Takeover channel comparison (measured on OnePlus 12)
+### Takeover channels (floor)
 
-| Channel | Behavior | Verdict |
-|---|---|---|
-| `devfreq/min_freq` | Overridden by `msm-adreno-tz` within seconds | ❌ unreliable |
-| **`min_pwrlevel`** | **13 min / 26 samples, zero override** | ✅ primary channel |
+| Channel | Node | Unit | 8g3 | 8e5 | Notes |
+|---|---|---|---|---|---|
+| Primary | `/sys/class/kgsl/kgsl-3d0/min_pwrlevel` | level | ✅ | ✅ | Most reliable; never observed being overridden |
+| Soft floor | `<kgsl>/devfreq/min_freq` | Hz | ✅ | ❌ node absent | Third-party tuners (Scene etc.) write here |
+| Kernel | `/sys/kernel/gpu/gpu_min_clock` | MHz | ✅ | ✅ | Common `msm_perf` / tuning-tool interface |
+
+> On 8e5 (SM8850) the `devfreq` device is registered but exposes **no frequency nodes** (gen8 moved
+> clock decisions into GMU DCVS, and all DCVS nodes are read-only). The module probes for the **node file**,
+> not the directory, so it skips automatically with zero no-op writes.
+> `min_pwrlevel` / `min_clock_mhz` / `gpu_min_clock` are three views of the **same backend** on 8e5.
+
+### Ceiling guard
+
+| Node | Unit | 8g3 | 8e5 |
+|---|---|---|---|
+| `max_pwrlevel` | level | ✅ | ✅ |
+| `max_gpuclk` | Hz | ✅ | ✅ |
+| `/sys/kernel/gpu/gpu_max_clock` | MHz | ✅ | ✅ |
+| `<kgsl>/devfreq/max_freq` | Hz | ✅ | ❌ node absent |
 
 ---
 
 ## Install
 
 ```text
-1. Flash g750-boost_v2.0.0.zip in KernelSU / Magisk / APatch
+1. Flash g750-boost_v2.1.1.zip in KernelSU / Magisk / APatch
 2. Confirm with the volume key (Vol+ = install / Vol- = cancel / 15s timeout = install)
 3. Reboot
 4. Open WebUI: http://127.0.0.1:8778
@@ -116,20 +134,18 @@ SoC         8 Gen3 (Adreno750)
 Live floor  680 MHz     ← actual kernel floor
 Target      680 MHz     ← your configured floor
 Current     720 MHz     ← real-time GPU frequency
-Max         903 MHz     ← ceiling (unchanged)
+Max         903 MHz     ← ceiling (guarded)
 Game        playing · com.netease.l22
 Temp        45 °C
 ```
 
-### Floor setting
+### Setting
 
 ```text
-[Dropdown] Target frequency: 903 / 834 / 770 / 720 / 680 / 629 / ... / 231 MHz
-           (built from your device's real frequency table)
+[Dropdown] Target floor:   903 / 834 / 770 / 720 / 680 / 629 / ... / 231 MHz
+[Dropdown] Ceiling:        0 = unlimited / or an explicit frequency
 [Save]     → write config → daemon hot-reloads within 5s
 ```
-
-**Note**: this selects the **minimum frequency (floor)**; the maximum is not changed.
 
 ---
 
@@ -151,10 +167,11 @@ Add your own by editing `/data/adb/modules/g750-boost/games.txt` (one package pe
 | SoC | GPU | Max | Frequency table (MHz) |
 |---|---|---|---|
 | SM8650 (8 Gen3) | Adreno 750 | 903 | 903 / 834 / 770 / 720 / 680 / 629 / 578 / 500 / 422 / 366 / 310 / 231 |
-| SM8750 (8 Elite) | Adreno 830 | 1100 | read at runtime |
+| SM8750 (8 Elite) | Adreno 830 | ~1100 | read at runtime |
 | SM8850 (8 Elite Gen5) | Adreno 840 | 1200 | 1200 / 1050 / 967 / 902 / 826 / 726 / 646 / 578 / 539 / 500 / 461 / 422 / 382 / 342 / 282 / 222 / 191 / 160 |
 
-> The module **always uses the device's runtime `available_frequencies`**; the table above is for reference only.
+> The module **always uses the device's runtime frequency table** (`available_frequencies` /
+> `gpu_available_frequencies`); the table above is for reference only.
 
 ### Floor mapping rule
 
@@ -168,9 +185,11 @@ Example: target 700 MHz → no exact entry → 720 MHz (smallest ≥ 700)
 
 ## Technical details
 
-- **Primary channel**: `/sys/class/kgsl/kgsl-3d0/min_pwrlevel`
-- **Fallback channel**: `/sys/class/kgsl/kgsl-3d0/devfreq/min_freq`
-- **Floor index**: `level = index in available_frequencies` (descending; smaller = higher floor)
+- **Floor channels**: `min_pwrlevel` (primary) · `devfreq/min_freq` (soft, 8g3) · `/sys/kernel/gpu/gpu_min_clock`
+- **Ceiling guard**: `max_pwrlevel` · `max_gpuclk` · `/sys/kernel/gpu/gpu_max_clock` · `devfreq/max_freq`
+- **Floor index**: `level = index in the frequency table` (descending; smaller index = higher floor)
+- **In-game check interval**: 1 s (read-only; writes only when the value drifts)
+- **Process management**: monitor process tree is cleaned on start and on exit — no orphan accumulation
 - **Recovery**: default saved at start (`num_pwrlevels - 1`); restored on exit / disable / uninstall / crash (trap); stale state cleaned on next start
 
 ---
@@ -194,13 +213,17 @@ Since the node is SoC-level (provided by the Qualcomm driver), the installer onl
 ## FAQ
 
 **Q: Minimum or maximum frequency?**
-A: Minimum (floor). The maximum is unchanged; the governor scales above the floor.
+A: Minimum (floor). The ceiling is guarded but never lowered below your setting; the governor scales above the floor.
 
 **Q: Does it raise power consumption a lot?**
 A: Only while a target game runs; restored on exit. The floor is adjustable in the WebUI.
 
 **Q: Why does "Current" frequency change?**
 A: That is the governor's real-time scaling, which is normal. As long as "Live floor" equals your target, it is working.
+
+**Q: The status panel shows a different floor than a third-party tuning app. Why?**
+A: Those apps usually read `devfreq/min_freq` only, while the module reads `min_pwrlevel`. KGSL does not
+synchronise the two views automatically, so the module writes both (plus `/sys/kernel/gpu`). Values now match.
 
 **Q: Does switching to a WeChat floating window drop the floor?**
 A: No. As long as the target game process exists, the floor is held; the 8-second hysteresis only detects a real exit.
