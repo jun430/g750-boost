@@ -1,8 +1,8 @@
 #!/system/bin/sh
-# G750 Boost proc_monitor.sh v2.1.2
-# - am_proc_start: 白名单主进程启动 -> 校验 PID -> 登记 marker
-# - am_proc_died:  白名单主进程退出 -> 记录精确退出时间（迟滞用）
-# - 事件只做"加速/记录"；真实存活判定始终由 service.sh 负责
+# G750 Boost proc_monitor.sh v2.1.3
+# - am_proc_start: 白名单主进程启动 -> 校验 PID -> 写事件缓存 state/game_proc
+# - am_proc_died:  白名单主进程退出 -> 清事件缓存 -> 记录精确退出时间（迟滞用）
+# - 事件即权威：service 只读 state/game_proc 决定游戏态，不再轮询 pidof
 # 作者: 雨色
 
 MODDIR=$1
@@ -10,7 +10,7 @@ STATE_DIR=$2
 LOG=$3
 
 [ -n "$MODDIR" ] && [ -n "$STATE_DIR" ] && [ -n "$LOG" ] || exit 1
-mkdir -p "$STATE_DIR/events"
+mkdir -p "$STATE_DIR"
 
 # ---- 单实例保护：已有存活实例则直接退出（防止重启累积）----
 MPIDF="$STATE_DIR/monitor.pid"
@@ -73,9 +73,9 @@ handle_start() {
   pid=$2
   is_game_pkg "$pkg" || return 0
   wait_target_cmdline "$pkg" "$pid" || return 0
-  mkdir -p "$STATE_DIR/events"
-  printf '%s\n' "$pkg" > "$STATE_DIR/events/$pid.tmp"
-  mv "$STATE_DIR/events/$pid.tmp" "$STATE_DIR/events/$pid"
+  # 事件即权威：游戏主进程启动 -> 把 (pkg pid) 缓存为当前游戏进程状态
+  printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_proc.tmp"
+  mv -f "$STATE_DIR/game_proc.tmp" "$STATE_DIR/game_proc"
   log "PROC START $pkg $pid"
 }
 
@@ -83,8 +83,11 @@ handle_died() {
   pkg=$1
   pid=$2
   is_game_pkg "$pkg" || return 0
+  # 只有当前缓存的游戏进程退出时才清状态（防重复事件/子进程误清）
+  _cur=""
+  read -r _cur < "$STATE_DIR/game_proc" 2>/dev/null
+  [ "$_cur" = "$pkg $pid" ] && rm -f "$STATE_DIR/game_proc"
   printf '%s %s\n' "$(date +%s)" "$pkg" > "$STATE_DIR/last_died"
-  rm -f "$STATE_DIR/events/$pid"
   log "PROC DIED $pkg $pid"
 }
 

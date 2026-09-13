@@ -231,26 +231,12 @@ check_game_pid() {
   if [ "$GAME_PID" != "$pid" ] || [ "$GAME_PKG" != "$pkg" ]; then
     GAME_PID=$pid
     GAME_PKG=$pkg
-    printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_process"
+    printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_proc"
   fi
   return 0
 }
 
-check_event_pids() {
-  for marker in "$STATE_DIR/events"/*; do
-    [ -f "$marker" ] || continue
-    pid=${marker##*/}
-    rd "$marker"
-    if check_game_pid "$RD" "$pid"; then
-      return 0
-    fi
-    rm -f "$marker"
-  done
-  return 1
-}
-
 check_game_running() {
-  check_event_pids && return 0
   [ -f "$MODDIR/games.txt" ] || return 1
   while IFS= read -r pkg || [ -n "$pkg" ]; do
     case "$pkg" in
@@ -271,7 +257,8 @@ discover_existing_games() {
     esac
     for pid in $(pidof "$pkg" 2>/dev/null); do
       if check_game_pid "$pkg" "$pid"; then
-        printf '%s\n' "$pkg" > "$STATE_DIR/events/$pid"
+        # 服务启动时游戏已在跑（不会有 start 事件）-> 直接写入事件缓存
+        printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_proc"
         break
       fi
     done
@@ -394,7 +381,7 @@ guard_ceiling() {
 }
 
 # ================= 启动 =================
-log "=== g750-boost v2.1.2 start pid=$$ ==="
+log "=== g750-boost v2.1.3 start pid=$$ ==="
 
 GB_GPU_CACHE_FILE=$GPU_PATH_CACHE
 gb_gpu_probe
@@ -486,7 +473,8 @@ STATE=idle
 # ================= 主循环 =================
 # 节拍设计（游戏轮询统一 0.3s）：
 #   - 地板只读校验 + 进程存活快速路径：每轮执行（0 fork 化）
-#   - 配置重算 / 上限护栏 / devfreq 与 kernel 同步 / 兜底 pid 扫描：低节拍（2~3s）
+#   - 配置重算 / 上限护栏 / devfreq 与 kernel 同步：低节拍（2s）
+#   - 游戏态由 state/game_proc 事件缓存驱动（每轮读，0 fork）；仅在缓存缺失时低频兜底扫描
 #   - 时间用 mksh 内置 $SECONDS（单调秒）做进程内节拍；仅在写 state/last_seen 时取 epoch
 # 状态文件只在目标变化时写（避免游戏 0.3s 时每轮 4 次写文件）
 NOW=0
@@ -582,33 +570,52 @@ while :; do
     [ "$CEIL_MHZ" = "$STATE_CEIL_MHZ" ] || { echo "$CEIL_MHZ" > "$STATE_DIR/ceil_mhz";    STATE_CEIL_MHZ=$CEIL_MHZ; }
   fi
 
-  # ---- 游戏检测：快速路径优先（每轮 0 fork），兜底扫描低频 ----
+  # ---- 游戏检测：读事件缓存（proc_monitor 写/删），每轮 0 fork ----
+  # 权威来源 = am_proc_start / am_proc_died 事件：
+  #   主进程启动 -> proc_monitor 写 state/game_proc("pkg pid")
+  #   主进程退出 -> proc_monitor 删 state/game_proc
+  # 主循环只读该文件 + 校验 pid 存活，不再轮询 pidof。
   is_game=0
   game_info=""
   if [ -f "$STATE_DIR/force_game" ]; then
     is_game=1
     game_info="TEST(force_game)"
-  elif [ -n "$GAME_PID" ] && [ -d "/proc/$GAME_PID" ]; then
-    # 快速路径：已知 pid 存活；每 10 轮校验一次 cmdline（防 pid 复用，仍 0 fork）
-    CHECK_TICK=$((CHECK_TICK + 1))
-    if [ $((CHECK_TICK % 10)) -eq 0 ]; then
-      _c=""
-      IFS= read -r -d '' _c < "/proc/$GAME_PID/cmdline" 2>/dev/null
-      [ "$_c" = "$GAME_PKG" ] || { GAME_PID=""; GAME_PKG=""; }
-    fi
-    if [ -n "$GAME_PID" ]; then
-      is_game=1
-      game_info="$GAME_PKG $GAME_PID"
-    fi
   else
-    GAME_PID=""
-    GAME_PKG=""
-    # 兜底：事件表优先 + pidof 扫描（~3s 节拍）
-    if [ "$NOW" -ge "$PID_SCAN_NEXT" ]; then
-      PID_SCAN_NEXT=$((NOW + 3))
-      if check_game_running; then
-        is_game=1
-        game_info="$GAME_PKG $GAME_PID"
+    _gpid=""
+    _gpkg=""
+    if [ -f "$STATE_DIR/game_proc" ]; then
+      rd "$STATE_DIR/game_proc"
+      _gpkg=${RD%% *}
+      _gpid=${RD##* }
+      if [ -n "$_gpid" ] && [ -d "/proc/$_gpid" ]; then
+        # 每 10 轮校验一次 cmdline（防 pid 复用，仍 0 fork）
+        CHECK_TICK=$((CHECK_TICK + 1))
+        if [ $((CHECK_TICK % 10)) -eq 0 ]; then
+          _c=""
+          IFS= read -r -d '' _c < "/proc/$_gpid/cmdline" 2>/dev/null
+          [ "$_c" = "$_gpkg" ] || _gpid=""
+        fi
+      else
+        _gpid=""
+      fi
+      [ -n "$_gpid" ] || rm -f "$STATE_DIR/game_proc"
+    fi
+    if [ -n "$_gpid" ]; then
+      is_game=1
+      GAME_PID=$_gpid
+      GAME_PKG=$_gpkg
+      game_info="$_gpkg $_gpid"
+    else
+      GAME_PID=""
+      GAME_PKG=""
+      # 兜底：monitor 未运行 / 服务重启时游戏已在跑（无 start 事件）-> 低频扫一次
+      if [ "$NOW" -ge "$PID_SCAN_NEXT" ]; then
+        PID_SCAN_NEXT=$((NOW + 5))
+        if check_game_running; then
+          is_game=1
+          game_info="$GAME_PKG $GAME_PID"
+          printf '%s %s\n' "$GAME_PKG" "$GAME_PID" > "$STATE_DIR/game_proc"
+        fi
       fi
     fi
   fi
@@ -646,7 +653,6 @@ while :; do
     fi
   else
     [ "$GAME_FILE_STATE" = "no" ] || { echo "no" > "$STATE_DIR/game"; GAME_FILE_STATE=no; }
-    rm -f "$STATE_DIR/game_process"
 
     if [ "$STATE" = "game" ]; then
       # 精确迟滞：用进程内最后存活时间（$SECONDS 单调秒），0 fork

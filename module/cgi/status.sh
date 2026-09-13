@@ -38,7 +38,38 @@ if [ -z "$min" ]; then
   [ -n "$_m" ] && min=$((_m / 1000000))
   [ -z "$min" ] && min=$(cat "$GPU/min_clock_mhz" 2>/dev/null)
 fi
-temp=$(awk '{printf "%d", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+# GPU 温度：动态探测（不同平台 zone 编号/名称不同，不能硬编码 zone0）
+#   - gpuss-* 为 Adreno GPU 传感器；缓存到 config/thermal_zone 避免重复遍历
+TZ_CACHE=$MODDIR/config/thermal_zone
+TZ=""
+if [ -r "$TZ_CACHE" ]; then
+  read -r TZ < "$TZ_CACHE" 2>/dev/null
+  [ -n "$TZ" ] && [ -f "$TZ/temp" ] || TZ=""
+fi
+if [ -z "$TZ" ]; then
+  # 第一优先：gpuss-0 / gpu-0（精确名称）
+  for z in /sys/class/thermal/thermal_zone*; do
+    ty=$(cat "$z/type" 2>/dev/null)
+    case "$ty" in
+      gpuss-0|gpu-0|gpu) TZ=$z; break ;;
+    esac
+  done
+fi
+if [ -z "$TZ" ]; then
+  # 第二优先：含 gpu / kgsl / adreno / gfx 语义
+  for z in /sys/class/thermal/thermal_zone*; do
+    ty=$(cat "$z/type" 2>/dev/null)
+    case "$ty" in
+      *gpu*|*kgsl*|*adreno*|*gfx*) TZ=$z; break ;;
+    esac
+  done
+fi
+if [ -z "$TZ" ]; then
+  # 兜底：zone0（部分平台 zone0 即真实温度）
+  TZ=/sys/class/thermal/thermal_zone0
+fi
+echo "$TZ" > "$TZ_CACHE" 2>/dev/null
+temp=$(awk '{printf "%d", $1/1000}' "$TZ/temp" 2>/dev/null)
 
 pwrlevel=$(cat "$GPU/min_pwrlevel" 2>/dev/null)
 num_levels=$(cat "$GPU/num_pwrlevels" 2>/dev/null)
@@ -49,7 +80,9 @@ ceil_level=$(cat "$STATE_DIR/ceil_level" 2>/dev/null)
 ceil_mhz=$(cat "$STATE_DIR/ceil_mhz" 2>/dev/null)
 game=$(cat "$STATE_DIR/game" 2>/dev/null)
 state=$(cat "$STATE_DIR/state" 2>/dev/null)
-process=$(cat "$STATE_DIR/game_process" 2>/dev/null)
+# 事件缓存 game_proc 为权威来源；game_process 为旧版遗留，仅作回退
+process=$(cat "$STATE_DIR/game_proc" 2>/dev/null)
+[ -z "$process" ] && process=$(cat "$STATE_DIR/game_process" 2>/dev/null)
 monitor=$(cat "$STATE_DIR/monitor_pid" 2>/dev/null)
 
 # 当前实际地板：优先由 min_pwrlevel 换算；无 pwrlevel 通道时用 min_freq

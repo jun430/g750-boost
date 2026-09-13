@@ -1,5 +1,5 @@
 SKIPUNZIP=0
-ui_print "- G750 Boost v2.1.2"
+ui_print "- G750 Boost v2.1.3"
 ui_print "- Snapdragon GPU floor booster (min_pwrlevel / min_freq / kernel gpu)"
 ui_print " "
 
