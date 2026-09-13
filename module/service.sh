@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# G750 Boost service.sh v2.1.5
+# G750 Boost service.sh v2.1.6
 # - 游戏地板档位接管（min_pwrlevel 主通道 / min_freq 回退通道）
 # - 上限档位（max_pwrlevel）常驻保护，防止其他模块/应用拉低
 # - 平台自适配: SM8650 / SM8750 / SM8850（运行时探测，不硬编码）
@@ -8,6 +8,21 @@
 #   旧版 1s 轮询（旧版每轮 ~30 次 fork）
 # - 退出 / 禁用 / 卸载 / 异常退出均恢复系统默认档位
 # 作者: 雨色
+
+# ---- v2.1.6: shell 兼容（关键）----
+# KernelSU 用 busybox ash 执行本脚本，而 busybox 的 $SECONDS 不会自增
+# （赋值后恒为 0）→ 所有节拍（配置重载/路径探针/迟滞/日志节流）全部失效，
+# 表现为"配置改了但地板不跟随"。此处检测并用 /system/bin/sh(mksh) 重执行自身，
+# 保留 $SECONDS 的零 fork 优势。exec 不改变 pid，故必须放在 LOCK 之前。
+if [ -z "$G750_MKSH" ]; then
+  SECONDS=0
+  sleep 1
+  if [ "${SECONDS:-0}" -lt 1 ] 2>/dev/null; then
+    export G750_MKSH=1
+    exec /system/bin/sh "$0" "$@"
+  fi
+fi
+SECONDS=0
 
 MODDIR=${0%/*}
 LOCK=/dev/.g750boost.lock
@@ -381,7 +396,7 @@ guard_ceiling() {
 }
 
 # ================= 启动 =================
-log "=== g750-boost v2.1.5 start pid=$$ ==="
+log "=== g750-boost v2.1.6 start pid=$$ ==="
 
 GB_GPU_CACHE_FILE=$GPU_PATH_CACHE
 gb_gpu_probe
@@ -480,7 +495,6 @@ STATE=idle
 #   - 时间用 mksh 内置 $SECONDS（单调秒）做进程内节拍；仅在写 state/last_seen 时取 epoch
 # 状态文件只在目标变化时写（避免游戏 0.3s 时每轮 4 次写文件）
 NOW=0
-MP_FAILS=0
 FLOOR_LVL=0
 FLOOR_MHZ=0
 CEIL_LVL=0
@@ -573,22 +587,11 @@ while :; do
     [ "$CEIL_MHZ" = "$STATE_CEIL_MHZ" ] || { echo "$CEIL_MHZ" > "$STATE_DIR/ceil_mhz";    STATE_CEIL_MHZ=$CEIL_MHZ; }
   fi
 
-  # ---- v2.1.5: proc_monitor 看护（事件源不能死，否则游戏识别退化为 5s 兜底）----
-  if [ -n "$MONITOR_PID" ]; then
-    if [ -d "/proc/$MONITOR_PID" ]; then
-      MP_FAILS=0
-    else
-      MP_FAILS=$((MP_FAILS + 1))
-      # 退避：启动即失败时不疯狂拉起（前 3 次立即重试，之后每 20 轮一次 ≈ 6s/20轮）
-      if [ "$MP_FAILS" -le 3 ] || [ $((MP_FAILS % 20)) -eq 0 ]; then
-        kill_monitor_tree
-        sh "$MODDIR/proc_monitor.sh" "$MODDIR" "$STATE_DIR" "$LOG" &
-        MONITOR_PID=$!
-        echo "$MONITOR_PID" > "$STATE_DIR/monitor_pid"
-        log "proc monitor respawn pid=$MONITOR_PID (fail #$MP_FAILS)"
-      fi
-    fi
-  fi
+  # [v2.1.6] proc_monitor 看护已移除：
+  #   proc_monitor.sh 自带单实例保护（monitor.pid），看护重启会被它 exit 挡回，
+  #   导致 MONITOR_PID 永远指向已退出进程 → 无限 respawn（fail #N 风暴）。
+  #   proc_monitor 由主循环启动阶段的 kill_monitor_tree + 重启管理，另有 5s
+  #   check_game_running 兜底，无需额外看护。
 
   # ---- 游戏检测：读事件缓存（proc_monitor 写/删），每轮 0 fork ----
   # 权威来源 = am_proc_start / am_proc_died 事件：
