@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# G750 Boost proc_monitor.sh v2.1.1
+# G750 Boost proc_monitor.sh v2.1.2
 # - am_proc_start: 白名单主进程启动 -> 校验 PID -> 登记 marker
 # - am_proc_died:  白名单主进程退出 -> 记录精确退出时间（迟滞用）
 # - 事件只做"加速/记录"；真实存活判定始终由 service.sh 负责

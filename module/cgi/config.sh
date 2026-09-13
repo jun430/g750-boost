@@ -47,8 +47,10 @@ else
   ceil=$(grep '^game_ceil_mhz=' "$CONFIG" 2>/dev/null | tail -n 1 | cut -d= -f2)
   is_num "$ceil" || ceil=$DEFAULT_CEIL
 
-  gb_platform_detect
+  # 与 service 共用路径缓存，避免每次 WebUI 轮询都重扫 sysfs
+  GB_GPU_CACHE_FILE=$MODDIR/config/gpu_paths.conf
   gb_gpu_probe
+  gb_platform_detect
   gb_load_freqs
   soc=$(getprop ro.soc.model 2>/dev/null)
   pname="${GB_PLATFORM_NAME:-unknown}"

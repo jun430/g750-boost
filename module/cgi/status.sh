@@ -4,11 +4,15 @@ MODDIR=$(cd "$(dirname "$0")/.." && pwd)
 STATE_DIR=$MODDIR/state
 
 . "$MODDIR/lib/platform.sh"
-gb_platform_detect
-gb_gpu_probe
 
-DF=${GB_DF:-/sys/class/kgsl/kgsl-3d0/devfreq}
+# 与 service 共用同一份路径缓存：命中则零扫描；失效才回退全量探测。
+GB_GPU_CACHE_FILE=$MODDIR/config/gpu_paths.conf
+gb_gpu_probe
+gb_platform_detect
+
+# 兜底路径跟随实际探测结果，避免硬编码某一代平台的物理路径。
 GPU=${GB_GPU_CLASS:-/sys/class/kgsl/kgsl-3d0}
+DF=${GB_DF:-$GPU/devfreq}
 
 soc=$(getprop ro.soc.model 2>/dev/null)
 platform_name="${GB_PLATFORM_NAME:-unknown}"

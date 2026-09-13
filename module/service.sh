@@ -1,9 +1,11 @@
 #!/system/bin/sh
-# G750 Boost service.sh v2.1.1
+# G750 Boost service.sh v2.1.2
 # - 游戏地板档位接管（min_pwrlevel 主通道 / min_freq 回退通道）
 # - 上限档位（max_pwrlevel）常驻保护，防止其他模块/应用拉低
 # - 平台自适配: SM8650 / SM8750 / SM8850（运行时探测，不硬编码）
-# - 游戏运行期间每 5s 只读校验，偏离才重写（最小开销）
+# - 热路径零 fork 化：节点读写 / 配置读取 / 进程校验全部走 shell 内建；
+#   游戏中每轮仅约 1 次 fork（只有 sleep），故 0.3s 轮询的绝对开销仍低于
+#   旧版 1s 轮询（旧版每轮 ~30 次 fork）
 # - 退出 / 禁用 / 卸载 / 异常退出均恢复系统默认档位
 # 作者: 雨色
 
@@ -12,11 +14,12 @@ LOCK=/dev/.g750boost.lock
 LOG=$MODDIR/boost.log
 STATE_DIR=$MODDIR/state
 CONFIG=$MODDIR/config/settings.conf
+GPU_PATH_CACHE=$MODDIR/config/gpu_paths.conf
 
 DEFAULT_FLOOR=680
 DEFAULT_CEIL=0
 POLL=5
-GAME_POLL=1
+GAME_POLL=0.3     # 游戏中统一 0.3s 轮询（热路径零 fork，开销极低）
 HYSTERESIS=8
 
 MONITOR_PID=""
@@ -25,89 +28,149 @@ STATE=idle
 ORIG_LEVEL=""
 ORIG_MAXLEVEL=""
 LAST_SEEN_GAME=0
+GAME_PID=""       # 当前跟踪的游戏主进程 pid（快速路径，免每轮 pidof）
+GAME_PKG=""
+CHECK_TICK=0
+CFG_SIG=""        # 配置签名（floor|ceil）：变化才重算档位映射
+STATE_LVL=""      # 已写入 state/ 的档位缓存（避免每轮重复写文件）
+STATE_MHZ=""
+STATE_CEIL_LVL=""
+STATE_CEIL_MHZ=""
+GAME_INFO=""
+GAME_FILE_STATE=""
+LAST_SEEN_FILE=""
+NOW_EPOCH=0
+OUT_LVL=""        # 当前生效地板档位 / MHz
+OUT_MHZ=""
+CEIL_LVL=""       # 当前生效上限档位 / MHz
+CEIL_MHZ=""
+EPOCH_NEXT=0
+CFG_NEXT=0
+PID_SCAN_NEXT=0
+PROBE_NEXT=0      # 路径缓存失效检查节拍（低频；失效才重探测）
 
 . "$MODDIR/lib/platform.sh"
 . "$MODDIR/lib/freq.sh"
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $1" >> "$LOG" 2>/dev/null; }
-log_throttled() { # $1=key $2=msg $3=秒(默认30)
+log_throttled() { # $1=key $2=msg $3=秒(默认30) —— 零 fork（$SECONDS 代替 date）
   _secs=${3:-30}
   _f="$STATE_DIR/ts_$1"
-  _slot=$(( $(date +%s) / _secs ))
-  [ "$(cat "$_f" 2>/dev/null)" = "$_slot" ] && return 0
+  _slot=$(( SECONDS / _secs ))
+  _old=""
+  read -r _old < "$_f" 2>/dev/null
+  [ "$_old" = "$_slot" ] && return 0
   echo "$_slot" > "$_f" 2>/dev/null
   log "$2"
 }
 
-# ---- 配置读取（容错：非法值回退默认；模式感知） ----
-default_floor() {
-  if [ "$GB_LIST_SRC" = "level" ]; then
-    echo "${GB_LEVEL_MAX:-0}"
-  else
-    echo "$DEFAULT_FLOOR"
-  fi
+# ---- 零 fork 取值/取配置 ----
+# rd <file>：结果放 $RD（内建 read，不 fork；sysfs/procfs 均为单行短文本）
+RD=""
+rd() {
+  RD=""
+  read -r RD < "$1" 2>/dev/null
 }
 
-cfg_floor() {
-  v=$(grep '^game_floor_mhz=' "$CONFIG" 2>/dev/null | tail -n 1 | cut -d= -f2)
-  case "$v" in
-    ''|*[!0-9]*) default_floor; return ;;
-  esac
-  if [ "$GB_LIST_SRC" = "level" ]; then
-    if [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ]; then echo "$v"; else default_floor; fi
-  else
-    if [ "$v" -ge 100 ] && [ "$v" -le 2000 ]; then echo "$v"; else echo "$DEFAULT_FLOOR"; fi
-  fi
+# 配置读入（内建 read + 文件重定向，非管道 → 不 fork）
+CFG_FLOOR_RAW=""
+CFG_CEIL_RAW=""
+CFG_POLL_RAW=""
+cfg_load() {
+  CFG_FLOOR_RAW=""
+  CFG_CEIL_RAW=""
+  CFG_POLL_RAW=""
+  [ -f "$CONFIG" ] || return 0
+  while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+    case "$_k" in
+      game_floor_mhz) CFG_FLOOR_RAW=$_v ;;
+      game_ceil_mhz)  CFG_CEIL_RAW=$_v ;;
+      game_poll)      CFG_POLL_RAW=$_v ;;
+    esac
+  done < "$CONFIG"
+  return 0
 }
+# ---- 配置解析（容错：非法值回退默认；模式感知；不创建子进程） ----
+# 结果写入 CFG_FLOOR / CFG_CEIL，主循环直接使用，避免每轮 grep|tail|cut。
+cfg_resolve() {
+  CFG_FLOOR="${GB_LEVEL_MAX:-0}"
+  [ "$GB_LIST_SRC" != "level" ] && CFG_FLOOR=$DEFAULT_FLOOR
 
-# 上限目标；0 或非法值 = 不限制（运行时按最高档解析）
-cfg_ceil() {
-  v=$(grep '^game_ceil_mhz=' "$CONFIG" 2>/dev/null | tail -n 1 | cut -d= -f2)
+  v=$CFG_FLOOR_RAW
   case "$v" in
-    ''|*[!0-9]*) echo "$DEFAULT_CEIL" ;;
+    ''|*[!0-9]*) ;;
     *)
       if [ "$GB_LIST_SRC" = "level" ]; then
-        if [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ]; then echo "$v"; else echo "$DEFAULT_CEIL"; fi
+        [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ] && CFG_FLOOR=$v
       else
-        if [ "$v" -eq 0 ]; then echo 0; elif [ "$v" -ge 100 ] && [ "$v" -le 3000 ]; then echo "$v"; else echo "$DEFAULT_CEIL"; fi
+        [ "$v" -ge 100 ] && [ "$v" -le 2000 ] && CFG_FLOOR=$v
+      fi
+      ;;
+  esac
+
+  CFG_CEIL=$DEFAULT_CEIL
+  v=$CFG_CEIL_RAW
+  case "$v" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$GB_LIST_SRC" = "level" ]; then
+        [ "$v" -ge 0 ] && [ "$v" -le "${GB_LEVEL_MAX:-0}" ] && CFG_CEIL=$v
+      else
+        if [ "$v" -eq 0 ]; then
+          CFG_CEIL=0
+        elif [ "$v" -ge 100 ] && [ "$v" -le 3000 ]; then
+          CFG_CEIL=$v
+        fi
       fi
       ;;
   esac
 }
 
-# ---- 恢复系统默认档位（幂等，含上限；8g3 / 8e / 8e5 同一逻辑）----
+
+# ---- 恢复系统默认档位（幂等；所有已接管节点统一恢复）----
 restore_orig() {
-  if [ "$GB_GPU_MODE" = "pwrlevel" ] && [ -n "$ORIG_LEVEL" ]; then
-    cur=$(gb_read_pwrlevel)
-    if [ "$cur" != "$ORIG_LEVEL" ]; then
+  # KGSL 主档位
+  if [ -n "$ORIG_LEVEL" ] && [ -f "$GB_GPU_CLASS/min_pwrlevel" ]; then
+    rd "$GB_GPU_CLASS/min_pwrlevel"
+    if [ "$RD" != "$ORIG_LEVEL" ]; then
       gb_write_pwrlevel "$ORIG_LEVEL"
-      log "restore pwrlevel $cur -> $ORIG_LEVEL"
+      log "restore pwrlevel $RD -> $ORIG_LEVEL"
     fi
   fi
   if [ -n "$ORIG_MAXLEVEL" ] && [ -f "$GB_GPU_CLASS/max_pwrlevel" ]; then
-    cm=$(gb_read_maxlevel)
-    if [ "$cm" != "$ORIG_MAXLEVEL" ]; then
+    rd "$GB_GPU_CLASS/max_pwrlevel"
+    if [ "$RD" != "$ORIG_MAXLEVEL" ]; then
       gb_write_maxlevel "$ORIG_MAXLEVEL"
-      log "restore max_pwrlevel $cm -> $ORIG_MAXLEVEL"
+      log "restore max_pwrlevel $RD -> $ORIG_MAXLEVEL"
     fi
   fi
-  # 恢复 devfreq 软下限：放到底档，交还内核 QoS / governor
-  if [ -n "$GB_DF" ] && [ -f "$GB_DF/min_freq" ]; then
-    bottom=$(echo "$GB_FREQS" | awk '{print $NF}')
-    case "$bottom" in
-      ''|*[!0-9]*) ;;
-      *) gb_write_minfreq "$bottom" ;;
-    esac
+
+  # KGSL MHz / Hz 镜像节点：与主档位一起恢复，防止残留旧版本写入。
+  if [ -f "$GB_GPU_CLASS/min_clock_mhz" ]; then
+    [ "$GB_BOTTOM_MHZ" -gt 0 ] 2>/dev/null && gb_write_minclock_mhz "$GB_BOTTOM_MHZ"
   fi
-  # 恢复 /sys/kernel/gpu（MHz 通道）
+  if [ -f "$GB_GPU_CLASS/min_gpuclk" ]; then
+    [ "$GB_BOTTOM_HZ" -gt 0 ] 2>/dev/null && gb_write_mingpuclk "$GB_BOTTOM_HZ"
+  fi
+  if [ -f "$GB_GPU_CLASS/max_clock_mhz" ]; then
+    [ "$GB_TOP_MHZ" -gt 0 ] 2>/dev/null && gb_write_maxclock_mhz "$GB_TOP_MHZ"
+  fi
+  if [ -f "$GB_GPU_CLASS/max_gpuclk" ]; then
+    [ "$GB_TOP_HZ" -gt 0 ] 2>/dev/null && gb_write_maxgpuclk "$GB_TOP_HZ"
+  fi
+
+  # devfreq 软下限/上限：交还内核 QoS / governor 的完整范围。
+  if [ -n "$GB_DF" ] && [ -f "$GB_DF/min_freq" ]; then
+    [ "$GB_BOTTOM_HZ" -gt 0 ] 2>/dev/null && gb_write_minfreq "$GB_BOTTOM_HZ"
+  fi
+  if [ -n "$GB_DF" ] && [ -f "$GB_DF/max_freq" ]; then
+    [ "$GB_TOP_HZ" -gt 0 ] 2>/dev/null && gb_write_maxfreq "$GB_TOP_HZ"
+  fi
+
+  # /sys/kernel/gpu（MHz 通道）
   if [ -n "$GB_GPU_KERNEL" ]; then
-    bottom_mhz=$(( $(echo "$GB_FREQS" | awk '{print $NF}') / 1000000 ))
-    top_m=$(gb_top_display)
-    [ "$bottom_mhz" -gt 0 ] 2>/dev/null && gb_write_gpumin "$bottom_mhz"
-    case "$top_m" in
-      ''|*[!0-9]*) ;;
-      *) [ "$top_m" -gt 0 ] && gb_write_gpumax "$top_m" ;;
-    esac
+    [ "$GB_BOTTOM_MHZ" -gt 0 ] 2>/dev/null && gb_write_gpumin "$GB_BOTTOM_MHZ"
+    [ "$GB_TOP_MHZ" -gt 0 ] 2>/dev/null && gb_write_gpumax "$GB_TOP_MHZ"
   fi
 }
 
@@ -143,21 +206,33 @@ echo $$ > "$LOCK/pid"
 trap cleanup INT TERM EXIT
 mkdir -p "$STATE_DIR/events"
 
-# ---- 目标进程校验（cmdline 精确匹配主包名） ----
+# ---- 目标进程校验（cmdline 精确匹配主包名；内建 read，避免热路径 fork） ----
 check_game_pid() {
   pkg=$1
   pid=$2
   [ -n "$pkg" ] && [ -n "$pid" ] || return 1
   [ -d "/proc/$pid" ] || return 1
-  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-  set -- $cmdline
-  cmdline=$1
-  [ "$cmdline" = "$pkg" ] || return 1
-  proc_state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
-  case "$proc_state" in
-    ""|Z|z) return 1 ;;
+
+  # /proc/<pid>/cmdline 第一字段以 NUL 结束；read -d '' 是 mksh 内建。
+  _cmd=""
+  IFS= read -r -d '' _cmd < "/proc/$pid/cmdline" 2>/dev/null
+  [ "$_cmd" = "$pkg" ] || return 1
+
+  # /proc/<pid>/stat: 从最后一个 ") " 后取第 3 字段（进程状态）。
+  # 用 shell 参数展开解析，避免 awk；最后一个分隔符可避开 comm 中的括号。
+  _stat=""
+  read -r _stat < "/proc/$pid/stat" 2>/dev/null
+  _stat=${_stat##*) }
+  _state=${_stat%% *}
+  case "$_state" in
+    ''|Z|z) return 1 ;;
   esac
-  printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_process"
+
+  if [ "$GAME_PID" != "$pid" ] || [ "$GAME_PKG" != "$pkg" ]; then
+    GAME_PID=$pid
+    GAME_PKG=$pkg
+    printf '%s %s\n' "$pkg" "$pid" > "$STATE_DIR/game_process"
+  fi
   return 0
 }
 
@@ -165,8 +240,8 @@ check_event_pids() {
   for marker in "$STATE_DIR/events"/*; do
     [ -f "$marker" ] || continue
     pid=${marker##*/}
-    pkg=$(cat "$marker" 2>/dev/null)
-    if check_game_pid "$pkg" "$pid"; then
+    rd "$marker"
+    if check_game_pid "$RD" "$pid"; then
       return 0
     fi
     rm -f "$marker"
@@ -203,12 +278,128 @@ discover_existing_games() {
   done < "$MODDIR/games.txt"
 }
 
-# ================= 启动 =================
-log "=== g750-boost v2.1.1 start pid=$$ ==="
+# 地板守护：每轮调用（0.3s）。节点存在就检查，偏离才写回。
+# 单位：pwrlevel=档位号；*_clock_mhz/gpu_min_clock=MHz；*_gpuclk/min_freq=Hz。
+guard_floor() {
+  if [ -f "$GB_GPU_CLASS/min_pwrlevel" ]; then
+    rd "$GB_GPU_CLASS/min_pwrlevel"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$FLOOR_LVL" ]; then
+           gb_write_pwrlevel "$FLOOR_LVL"
+           log_throttled floor_pwrlevel "floor protect min_pwrlevel $RD -> $FLOOR_LVL"
+         fi ;;
+    esac
+  fi
+  if [ -f "$GB_GPU_CLASS/min_clock_mhz" ]; then
+    rd "$GB_GPU_CLASS/min_clock_mhz"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$FLOOR_MHZ" ]; then
+           gb_write_minclock_mhz "$FLOOR_MHZ"
+           log_throttled floor_minclock "floor protect min_clock_mhz $RD -> $FLOOR_MHZ"
+         fi ;;
+    esac
+  fi
+  if [ -f "$GB_GPU_CLASS/min_gpuclk" ]; then
+    want_hz=$((FLOOR_MHZ * 1000000))
+    rd "$GB_GPU_CLASS/min_gpuclk"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$want_hz" ]; then
+           gb_write_mingpuclk "$want_hz"
+           log_throttled floor_mingpuclk "floor protect min_gpuclk $RD -> $want_hz"
+         fi ;;
+    esac
+  fi
+  if [ -n "$GB_DF" ] && [ -f "$GB_DF/min_freq" ]; then
+    want_hz=$((FLOOR_MHZ * 1000000))
+    rd "$GB_DF/min_freq"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$want_hz" ]; then
+           gb_write_minfreq "$want_hz"
+           log_throttled floor_minfreq "floor protect min_freq $RD -> $want_hz"
+         fi ;;
+    esac
+  fi
+  if [ -n "$GB_GPU_KERNEL" ] && [ -f "$GB_GPU_KERNEL/gpu_min_clock" ]; then
+    rd "$GB_GPU_KERNEL/gpu_min_clock"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$FLOOR_MHZ" ]; then
+           gb_write_gpumin "$FLOOR_MHZ"
+           log_throttled floor_gpumin "floor protect gpu_min_clock $RD -> $FLOOR_MHZ"
+         fi ;;
+    esac
+  fi
+}
 
-gb_platform_detect
+# 上限守护：每轮调用（0.3s）。节点存在就检查，偏低才写回。
+# 不按 GB_GPU_MODE 分支，8e/8e5 与 8g3 统一覆盖实际存在的全部节点。
+guard_ceiling() {
+  if [ -f "$GB_GPU_CLASS/max_pwrlevel" ]; then
+    rd "$GB_GPU_CLASS/max_pwrlevel"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" != "$CEIL_LVL" ]; then
+           gb_write_maxlevel "$CEIL_LVL"
+           log_throttled ceil_pwrlevel "ceil protect max_pwrlevel $RD -> $CEIL_LVL (${CEIL_MHZ}MHz)"
+         fi ;;
+    esac
+  fi
+  if [ -f "$GB_GPU_CLASS/max_clock_mhz" ]; then
+    rd "$GB_GPU_CLASS/max_clock_mhz"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" -lt "$CEIL_MHZ" ]; then
+           gb_write_maxclock_mhz "$CEIL_MHZ"
+           log_throttled ceil_maxclock "ceil protect max_clock_mhz $RD -> $CEIL_MHZ"
+         fi ;;
+    esac
+  fi
+  if [ -f "$GB_GPU_CLASS/max_gpuclk" ]; then
+    want_hz=$((CEIL_MHZ * 1000000))
+    rd "$GB_GPU_CLASS/max_gpuclk"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" -lt "$want_hz" ]; then
+           gb_write_maxgpuclk "$want_hz"
+           log_throttled ceil_maxgpuclk "ceil protect max_gpuclk $RD -> $want_hz"
+         fi ;;
+    esac
+  fi
+  if [ -n "$GB_DF" ] && [ -f "$GB_DF/max_freq" ]; then
+    want_hz=$((CEIL_MHZ * 1000000))
+    rd "$GB_DF/max_freq"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" -lt "$want_hz" ]; then
+           gb_write_maxfreq "$want_hz"
+           log_throttled ceil_maxfreq "ceil protect max_freq $RD -> $want_hz"
+         fi ;;
+    esac
+  fi
+  if [ -n "$GB_GPU_KERNEL" ] && [ -f "$GB_GPU_KERNEL/gpu_max_clock" ]; then
+    rd "$GB_GPU_KERNEL/gpu_max_clock"
+    case "$RD" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$RD" -lt "$CEIL_MHZ" ]; then
+           gb_write_gpumax "$CEIL_MHZ"
+           log_throttled ceil_gpumax "ceil protect gpu_max_clock $RD -> $CEIL_MHZ"
+         fi ;;
+    esac
+  fi
+  return 0
+}
+
+# ================= 启动 =================
+log "=== g750-boost v2.1.2 start pid=$$ ==="
+
+GB_GPU_CACHE_FILE=$GPU_PATH_CACHE
 gb_gpu_probe
-log "platform=$GB_PLATFORM ($GB_PLATFORM_NAME) supported=$GB_SUPPORTED gpu_mode=$GB_GPU_MODE"
+gb_platform_detect
+log "platform=$GB_PLATFORM ($GB_PLATFORM_NAME) supported=$GB_SUPPORTED gpu_mode=$GB_GPU_MODE cache=$GPU_PATH_CACHE"
 
 # 节点可用性诊断（8g3 / 8e / 8e5 同一套逻辑，节点不存在自动跳过）
 _nodes=""
@@ -293,6 +484,44 @@ discover_existing_games
 STATE=idle
 
 # ================= 主循环 =================
+# 节拍设计（游戏轮询统一 0.3s）：
+#   - 地板只读校验 + 进程存活快速路径：每轮执行（0 fork 化）
+#   - 配置重算 / 上限护栏 / devfreq 与 kernel 同步 / 兜底 pid 扫描：低节拍（2~3s）
+#   - 时间用 mksh 内置 $SECONDS（单调秒）做进程内节拍；仅在写 state/last_seen 时取 epoch
+# 状态文件只在目标变化时写（避免游戏 0.3s 时每轮 4 次写文件）
+NOW=0
+FLOOR_LVL=0
+FLOOR_MHZ=0
+CEIL_LVL=0
+CEIL_MHZ=0
+GB_CEIL_OK=1
+
+# 预载配置 + 初始档位映射
+cfg_load
+cfg_resolve
+gb_map_floor "$CFG_FLOOR"
+FLOOR_LVL=$GB_MAP_LEVEL
+FLOOR_MHZ=$GB_MAP_MHZ
+gb_top_display
+TOP_MHZ=$GB_TOP_DISPLAY
+if [ -z "$CFG_CEIL" ] || [ "$CFG_CEIL" -le 0 ]; then
+  CEIL_LVL=0
+  CEIL_MHZ=$TOP_MHZ
+else
+  gb_map_ceil "$CFG_CEIL"
+  CEIL_LVL=$GB_MAP_LEVEL
+  CEIL_MHZ=$GB_MAP_MHZ
+fi
+if [ "$FLOOR_LVL" -lt "$CEIL_LVL" ]; then
+  FLOOR_LVL=$CEIL_LVL
+  gb_level_to_mhz "$FLOOR_LVL"
+  FLOOR_MHZ=$GB_LEVEL_MHZ
+fi
+echo "$FLOOR_LVL" > "$STATE_DIR/floor_level"; STATE_LVL=$FLOOR_LVL
+echo "$FLOOR_MHZ" > "$STATE_DIR/floor_mhz";  STATE_MHZ=$FLOOR_MHZ
+echo "$CEIL_LVL" > "$STATE_DIR/ceil_level";  STATE_CEIL_LVL=$CEIL_LVL
+echo "$CEIL_MHZ" > "$STATE_DIR/ceil_mhz";    STATE_CEIL_MHZ=$CEIL_MHZ
+
 while :; do
   if [ -f "$MODDIR/disable" ]; then
     restore_orig
@@ -305,177 +534,123 @@ while :; do
     exit 0
   fi
 
-  # 目标档位（配置热加载：WebUI 修改后 5 秒内生效）
-  floor_mhz=$(cfg_floor)
-  set -- $(gb_map_floor "$floor_mhz")
-  out_lvl=$1
-  out_mhz=$2
-  case "$out_lvl" in
-    ''|*[!0-9]*) out_lvl=$ORIG_LEVEL; out_mhz=$(gb_level_to_mhz "$out_lvl") ;;
-  esac
+  NOW=$SECONDS
 
-  # 上限档位（0/空 = 不限制，取最高档）
-  ceil_mhz=$(cfg_ceil)
-  top_mhz=$(gb_top_display)
-  if [ -z "$ceil_mhz" ] || [ "$ceil_mhz" -le 0 ]; then
-    ceil_lvl=0
-    ceil_mhz=$top_mhz
-  else
-    set -- $(gb_map_ceil "$ceil_mhz")
-    ceil_lvl=$1
-    ceil_mhz=$2
-  fi
-  case "$ceil_lvl" in
-    ''|*[!0-9]*) ceil_lvl=0 ;;
-  esac
-  # 地板不能高于上限（pwrlevel 数字越小频率越高，故地板档位号须 >= 上限档位号）
-  if [ "$out_lvl" -lt "$ceil_lvl" ]; then
-    out_lvl=$ceil_lvl
-    out_mhz=$(gb_level_to_mhz "$out_lvl")
+  # ---- 路径缓存失效检测（~2s 节拍；命中缓存时零扫描，失效才重探测）----
+  if [ "$NOW" -ge "$PROBE_NEXT" ]; then
+    PROBE_NEXT=$((NOW + 2))
+    _bad=0
+    [ -n "$GB_GPU_CLASS" ] && [ ! -d "$GB_GPU_CLASS" ] && _bad=1
+    [ -n "$GB_DF" ] && [ ! -d "$GB_DF" ] && _bad=1
+    [ -n "$GB_FREQ_FILE" ] && [ ! -r "$GB_FREQ_FILE" ] && _bad=1
+    [ -n "$GB_GPU_KERNEL" ] && [ ! -d "$GB_GPU_KERNEL" ] && _bad=1
+    if [ "$_bad" = "1" ]; then
+      GB_FORCE_PROBE=1
+      gb_gpu_probe
+      GB_FORCE_PROBE=""
+      log "gpu path re-probe -> class=$GB_GPU_CLASS df=$GB_DF mode=$GB_GPU_MODE"
+    fi
   fi
 
-  # 状态缓存：每轮更新（空闲时也显示当前配置的目标档位 / 上限）
-  echo "$out_lvl" > "$STATE_DIR/floor_level"
-  echo "$out_mhz" > "$STATE_DIR/floor_mhz"
-  echo "$ceil_lvl" > "$STATE_DIR/ceil_level"
-  echo "$ceil_mhz" > "$STATE_DIR/ceil_mhz"
-
-  # 上限保护：每轮写回设定上限，防止其他模块/应用/游戏拉低
-  # （8g3 / 8e / 8e5 同一逻辑；节点不存在自动跳过）
-  if [ "$GB_GPU_MODE" = "pwrlevel" ]; then
-    cur_max=$(gb_read_maxlevel)
-    if [ "$cur_max" != "$ceil_lvl" ]; then
-      gb_write_maxlevel "$ceil_lvl"
-      log_throttled ceil_pwrlevel "ceil protect max_pwrlevel $cur_max -> $ceil_lvl (${ceil_mhz}MHz)"
+  # ---- 低频段：配置热加载 + 档位重算（~2s 一次；WebUI 改动 2s 内生效）----
+  if [ "$NOW" -ge "$CFG_NEXT" ]; then
+    CFG_NEXT=$((NOW + 2))
+    cfg_load
+    cfg_resolve
+    gb_map_floor "$CFG_FLOOR"
+    FLOOR_LVL=$GB_MAP_LEVEL
+    FLOOR_MHZ=$GB_MAP_MHZ
+    gb_top_display
+    TOP_MHZ=$GB_TOP_DISPLAY
+    if [ -z "$CFG_CEIL" ] || [ "$CFG_CEIL" -le 0 ]; then
+      CEIL_LVL=0
+      CEIL_MHZ=$TOP_MHZ
+    else
+      gb_map_ceil "$CFG_CEIL"
+      CEIL_LVL=$GB_MAP_LEVEL
+      CEIL_MHZ=$GB_MAP_MHZ
     fi
-    # devfreq/max_freq 护栏（有些游戏直接写 max_freq 拉低上限）
-    if [ -n "$GB_DF" ] && [ -f "$GB_DF/max_freq" ]; then
-      want_max=$((ceil_mhz * 1000000))
-      cur_mf=$(cat "$GB_DF/max_freq" 2>/dev/null)
-      if [ -n "$cur_mf" ] && [ "$cur_mf" -lt "$want_max" ]; then
-        gb_write_maxfreq "$want_max"
-        log_throttled ceil_maxfreq "ceil protect max_freq $cur_mf -> $want_max"
-      fi
+    if [ "$FLOOR_LVL" -lt "$CEIL_LVL" ]; then
+      FLOOR_LVL=$CEIL_LVL
+      gb_level_to_mhz "$FLOOR_LVL"
+      FLOOR_MHZ=$GB_LEVEL_MHZ
     fi
-    # max_gpuclk 护栏（8g3/8e/8e5 均存在且可写，游戏可能写它拉低上限）
-    if [ -f "$GB_GPU_CLASS/max_gpuclk" ]; then
-      want_hz=$((ceil_mhz * 1000000))
-      cur_gc=$(cat "$GB_GPU_CLASS/max_gpuclk" 2>/dev/null)
-      if [ -n "$cur_gc" ] && [ "$cur_gc" -lt "$want_hz" ]; then
-        chmod 644 "$GB_GPU_CLASS/max_gpuclk" 2>/dev/null
-        echo "$want_hz" > "$GB_GPU_CLASS/max_gpuclk" 2>/dev/null
-        log_throttled ceil_maxgpuclk "ceil protect max_gpuclk $cur_gc -> $want_hz"
-      fi
-    fi
-  # /sys/kernel/gpu/gpu_max_clock 护栏（MHz；msm_perf / 性能工具路径）
-    if [ -n "$GB_GPU_KERNEL" ] && [ -f "$GB_GPU_KERNEL/gpu_max_clock" ]; then
-      cur_gk=$(gb_read_gpumax)
-      case "$cur_gk" in
-        ''|*[!0-9]*) ;;
-        *)
-          if [ "$cur_gk" -lt "$ceil_mhz" ]; then
-            gb_write_gpumax "$ceil_mhz"
-            log_throttled ceil_gpumax "ceil protect gpu_max_clock $cur_gk -> $ceil_mhz"
-          fi
-          ;;
-      esac
-    fi
-  else
-    gb_write_maxfreq "$((ceil_mhz * 1000000))"
+    # state 状态文件：只在目标变化时写
+    [ "$FLOOR_LVL" = "$STATE_LVL" ] || { echo "$FLOOR_LVL" > "$STATE_DIR/floor_level"; STATE_LVL=$FLOOR_LVL; }
+    [ "$FLOOR_MHZ" = "$STATE_MHZ" ] || { echo "$FLOOR_MHZ" > "$STATE_DIR/floor_mhz";  STATE_MHZ=$FLOOR_MHZ; }
+    [ "$CEIL_LVL" = "$STATE_CEIL_LVL" ] || { echo "$CEIL_LVL" > "$STATE_DIR/ceil_level";  STATE_CEIL_LVL=$CEIL_LVL; }
+    [ "$CEIL_MHZ" = "$STATE_CEIL_MHZ" ] || { echo "$CEIL_MHZ" > "$STATE_DIR/ceil_mhz";    STATE_CEIL_MHZ=$CEIL_MHZ; }
   fi
 
-  now=$(date +%s)
+  # ---- 游戏检测：快速路径优先（每轮 0 fork），兜底扫描低频 ----
   is_game=0
   game_info=""
-
-  # 开发测试后门: state/force_game 存在时视为游戏运行（正式使用不受影响）
   if [ -f "$STATE_DIR/force_game" ]; then
     is_game=1
     game_info="TEST(force_game)"
-  elif check_game_running; then
-    is_game=1
-    game_info=$(cat "$STATE_DIR/game_process" 2>/dev/null)
+  elif [ -n "$GAME_PID" ] && [ -d "/proc/$GAME_PID" ]; then
+    # 快速路径：已知 pid 存活；每 10 轮校验一次 cmdline（防 pid 复用，仍 0 fork）
+    CHECK_TICK=$((CHECK_TICK + 1))
+    if [ $((CHECK_TICK % 10)) -eq 0 ]; then
+      _c=""
+      IFS= read -r -d '' _c < "/proc/$GAME_PID/cmdline" 2>/dev/null
+      [ "$_c" = "$GAME_PKG" ] || { GAME_PID=""; GAME_PKG=""; }
+    fi
+    if [ -n "$GAME_PID" ]; then
+      is_game=1
+      game_info="$GAME_PKG $GAME_PID"
+    fi
+  else
+    GAME_PID=""
+    GAME_PKG=""
+    # 兜底：事件表优先 + pidof 扫描（~3s 节拍）
+    if [ "$NOW" -ge "$PID_SCAN_NEXT" ]; then
+      PID_SCAN_NEXT=$((NOW + 3))
+      if check_game_running; then
+        is_game=1
+        game_info="$GAME_PKG $GAME_PID"
+      fi
+    fi
   fi
 
+  # ---- 地板写入 / 校验 / 上限护栏 ----
   if [ $is_game -eq 1 ]; then
-    echo "yes" > "$STATE_DIR/game"
-    echo "$now" > "$STATE_DIR/last_seen"
-    LAST_SEEN_GAME=$now
-
     if [ "$STATE" != "game" ]; then
-      # 进入游戏：写入目标地板（pwrlevel 主通道 + devfreq 软下限同步）
-      # 8g3 / 8e / 8e5 同一逻辑
+      # 进入游戏：统一写入所有存在的下限节点，再统一守护所有上限节点。
+      # 不按平台/GB_GPU_MODE 分支；8g3 / 8e / 8e5 都按实际节点执行。
       rm -f "$STATE_DIR/last_died"
-      if [ "$GB_GPU_MODE" = "pwrlevel" ]; then
-        gb_write_pwrlevel "$out_lvl"
-        gb_write_minfreq "$((out_mhz * 1000000))"
-        gb_write_gpumin "$out_mhz"
-        log "GAME RUNNING $game_info -> floor ${out_mhz}MHz (pwrlevel $out_lvl) ceil ${ceil_mhz}MHz"
-        # 写后回读自检：被驱动丢弃则告警（8e5 已知现象）
-        _pw=$(cat "$GB_GPU_CLASS/min_pwrlevel" 2>/dev/null)
-        if [ -n "$_pw" ] && [ "$_pw" != "$out_lvl" ]; then
-          log "WARN floor write rejected: min_pwrlevel=$_pw want=$out_lvl (driver gated)"
-        fi
-      else
-        gb_write_minfreq "$((out_mhz * 1000000))"
-        log "GAME RUNNING $game_info -> min_freq ${out_mhz}MHz (fallback) ceil ${ceil_mhz}MHz"
+      guard_floor
+      log "GAME RUNNING $game_info -> floor ${FLOOR_MHZ}MHz (level $FLOOR_LVL) ceil ${CEIL_MHZ}MHz"
+      rd "$GB_GPU_CLASS/min_pwrlevel"
+      if [ -n "$RD" ] && [ "$RD" != "$FLOOR_LVL" ]; then
+        log "WARN floor write rejected: min_pwrlevel=$RD want=$FLOOR_LVL (driver gated)"
       fi
+      guard_ceiling
+
       STATE=game
+      [ "$GAME_FILE_STATE" = "yes" ] || { echo "yes" > "$STATE_DIR/game"; GAME_FILE_STATE=yes; }
       echo "game" > "$STATE_DIR/state"
+      NOW_EPOCH=$(date +%s); echo "$NOW_EPOCH" > "$STATE_DIR/last_seen"
+      LAST_SEEN_GAME=$NOW
     else
-      # 运行中：只读校验，偏离才重写（8g3 / 8e / 8e5 同一逻辑）
-      if [ "$GB_GPU_MODE" = "pwrlevel" ]; then
-        cur_pw=$(gb_read_pwrlevel)
-        if [ "$cur_pw" != "$out_lvl" ]; then
-          gb_write_pwrlevel "$out_lvl"
-          log_throttled floor_drift "floor drift $cur_pw -> $out_lvl (re-applied)"
-        fi
-        # devfreq/min_freq 同步护栏（内核 QoS 会周期性改写；日志 30s 节流）
-        if [ -n "$GB_DF" ] && [ -f "$GB_DF/min_freq" ]; then
-          want_minf=$((out_mhz * 1000000))
-          cur_minf=$(cat "$GB_DF/min_freq" 2>/dev/null)
-          if [ -n "$cur_minf" ] && [ "$cur_minf" != "$want_minf" ]; then
-            gb_write_minfreq "$want_minf"
-            log_throttled floor_minfreq "floor sync min_freq $cur_minf -> $want_minf"
-          fi
-        fi
-        # /sys/kernel/gpu/gpu_min_clock 同步护栏（MHz；msm_perf / 性能工具路径）
-        if [ -n "$GB_GPU_KERNEL" ] && [ -f "$GB_GPU_KERNEL/gpu_min_clock" ]; then
-          cur_gk=$(gb_read_gpumin)
-          case "$cur_gk" in
-            ''|*[!0-9]*) ;;
-            *)
-              if [ "$cur_gk" != "$out_mhz" ]; then
-                gb_write_gpumin "$out_mhz"
-                log_throttled floor_gpumin "floor sync gpu_min_clock $cur_gk -> $out_mhz"
-              fi
-              ;;
-          esac
-        fi
-        old_floor=$(cat "$STATE_DIR/floor_level" 2>/dev/null)
-        if [ "$old_floor" != "$out_lvl" ]; then
-          log "floor target updated: ${out_mhz}MHz (level $out_lvl)"
-        fi
-      else
-        gb_write_minfreq "$((out_mhz * 1000000))"
+      # 游戏运行中：所有下限节点 + 所有上限节点每轮统一检查，偏离才写回。
+      guard_floor
+      guard_ceiling
+
+      # last_seen 文件（~5s 节拍写，减少 IO）
+      if [ "$NOW" -ge "$EPOCH_NEXT" ]; then
+        EPOCH_NEXT=$((NOW + 5))
+        NOW_EPOCH=$(date +%s); echo "$NOW_EPOCH" > "$STATE_DIR/last_seen"
+        LAST_SEEN_GAME=$NOW
       fi
     fi
   else
-    echo "no" > "$STATE_DIR/game"
+    [ "$GAME_FILE_STATE" = "no" ] || { echo "no" > "$STATE_DIR/game"; GAME_FILE_STATE=no; }
     rm -f "$STATE_DIR/game_process"
 
     if [ "$STATE" = "game" ]; then
-      # 精确迟滞: 优先采用 am_proc_died 事件时间
-      last_seen=$(cat "$STATE_DIR/last_seen" 2>/dev/null)
-      [ -n "$last_seen" ] || last_seen=$now
-      died_info=$(tail -n 1 "$STATE_DIR/last_died" 2>/dev/null)
-      died_ts=${died_info%% *}
-      case "$died_ts" in
-        ''|*[!0-9]*) ;;
-        *) [ "$died_ts" -ge "$last_seen" ] && last_seen=$died_ts ;;
-      esac
-
-      if [ $((now - last_seen)) -ge $HYSTERESIS ]; then
+      # 精确迟滞：用进程内最后存活时间（$SECONDS 单调秒），0 fork
+      if [ $((NOW - LAST_SEEN_GAME)) -ge $HYSTERESIS ]; then
         restore_orig
         log "GAME EXIT (idle ${HYSTERESIS}s) -> restore pwrlevel $ORIG_LEVEL (+max_pwrlevel, min_freq)"
         STATE=idle
@@ -484,7 +659,7 @@ while :; do
     fi
   fi
 
-  # 游戏运行中缩短校验周期（1s），空闲用默认周期（5s）
+  # 轮询节拍：游戏中统一 0.3s（零 fork 热路径，开销极低），空闲 5s
   if [ "$STATE" = "game" ]; then
     sleep_interv=$GAME_POLL
   else

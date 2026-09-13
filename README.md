@@ -1,7 +1,7 @@
 # G750 Boost — 游戏 GPU 地板档位模块
 
 **作者**: 雨色  
-**版本**: v2.1.1  
+**版本**: v2.1.2  
 **适配**: SM8650 (8 Gen3 / Adreno750) · SM8750 (8 Elite / Adreno830) · SM8850 (8 Elite Gen5 / Adreno840)
 
 ---
@@ -9,6 +9,14 @@
 ## 一句话介绍
 
 游戏中把 GPU 地板抬到你设置的档位（默认 680MHz）并锁住上限，系统 governor 在地板以上自由调频；退出游戏 8 秒后自动恢复。
+
+## v2.1.2 新特性
+
+- ✅ **安装期节点探测按实际平台路径**：复用运行时引擎 `lib/platform.sh`（多路径 + 平台自适应），8e5 安装时不再误报"未检测到 KGSL 节点"，明确提示"devfreq 空壳由 GMU DCVS 接管属正常"
+- ✅ **热路径零 fork 化**：节点读写 / 配置读取 / 进程校验全部走 shell 内建（`read`/`echo`/`$SECONDS`），游戏轮询 **统一 0.3s**（实测每轮含地板+上限共 6 路校验 ≈ 73μs，CPU 占用 <0.02%，比旧版 1s 轮询的几十次 fork 还低一个量级）
+- ✅ **上限护栏同频**：`max_pwrlevel` / `max_freq` / `max_gpuclk` / `gpu_max_clock` 四路同样每 0.3s 检测，其他游戏/模块拉低上限后 0.3s 内拉回
+- ✅ 配置热加载 / 状态文件只在变化时写，减少 0.3s 轮询下的 IO
+- ✅ 修复 WebUI 页脚版本号不一致
 
 ## v2.1.1 新特性
 
@@ -35,7 +43,7 @@
               min_pwrlevel（档位号）
               devfreq/min_freq（Hz，节点存在时）
               /sys/kernel/gpu/gpu_min_clock（MHz，节点存在时）
-游戏运行  → 每 1 秒只读校验，偏离才重写；governor 在地板以上自由调频
+游戏运行  → 每 0.3 秒只读校验（零 fork，偏离才重写）；governor 在地板以上自由调频
             同时守卫上限：max_pwrlevel / max_gpuclk / gpu_max_clock / max_freq
 游戏退出  → 8 秒迟滞 → 恢复系统默认档位（num_pwrlevels-1）
 ```
@@ -113,6 +121,13 @@
 | SM8750 | 运行时自动读取 |
 
 ## 更新日志
+
+### v2.1.2 (2026-09-13)
+- 安装期节点探测重构：按实际平台路径探测（复用运行时引擎），8e5 不再误报
+- 热路径零 fork 化：内建 read/echo 替代 cat/命令替换，游戏轮询统一 0.3s（实测每轮 73μs）
+- 上限护栏同频 0.3s：四路上限节点每轮检测，拉低后 0.3s 内恢复
+- 修复：WebUI 页脚版本号 v2.1.0 → v2.1.2
+- 修复：启动 banner 版本号与 module.prop 一致（v2.1.2 / versionCode 11）
 
 ### v2.1.1 (2026-09-13)
 - 三通道地板接管（min_pwrlevel / devfreq min_freq / kernel gpu_min_clock）

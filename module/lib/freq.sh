@@ -12,6 +12,10 @@ gb_load_freqs() {
   GB_LIST_SRC=none
   GB_LEVEL_MAX=-1
   GB_FREQS=""
+  GB_TOP_HZ=0
+  GB_BOTTOM_HZ=0
+  GB_TOP_MHZ=0
+  GB_BOTTOM_MHZ=0
 
   if [ -n "$GB_FREQ_FILE" ] && [ -r "$GB_FREQ_FILE" ]; then
     raw=$(cat "$GB_FREQ_FILE" 2>/dev/null)
@@ -32,8 +36,14 @@ gb_load_freqs() {
 
   if [ "$GB_LIST_SRC" = "freq" ] && [ -n "$GB_FREQS" ]; then
     n=0
-    for x in $GB_FREQS; do n=$((n + 1)); done
+    for x in $GB_FREQS; do
+      [ "$n" -eq 0 ] && GB_TOP_HZ=$x
+      GB_BOTTOM_HZ=$x
+      n=$((n + 1))
+    done
     GB_LEVEL_MAX=$((n - 1))
+    GB_TOP_MHZ=$((GB_TOP_HZ / 1000000))
+    GB_BOTTOM_MHZ=$((GB_BOTTOM_HZ / 1000000))
     return 0
   fi
 
@@ -57,16 +67,22 @@ gb_load_freqs() {
   return 1
 }
 
-# 目标 -> "level display"
-#   freq 模式: target = MHz，选 >= 目标的最小档（保性能）
-#   level 模式: target = 档位号，直接使用
+# 映射结果写入 GB_MAP_LEVEL / GB_MAP_MHZ，避免 command substitution fork。
+#   freq 模式: floor 目标选 >= 目标的最小档；ceil 目标选 <= 目标的最大档
+#   level 模式: 目标直接按档位号处理
+GB_MAP_LEVEL=""
+GB_MAP_MHZ=""
+GB_LEVEL_MHZ=""
+GB_TOP_DISPLAY=""
+
 gb_map_floor() {
   target=$1
   if [ "$GB_LIST_SRC" = "level" ]; then
     lvl=$target
     case "$lvl" in ''|*[!0-9]*) lvl=$GB_LEVEL_MAX ;; esac
     [ "$lvl" -gt "$GB_LEVEL_MAX" ] && lvl=$GB_LEVEL_MAX
-    echo "$lvl $lvl"
+    GB_MAP_LEVEL=$lvl
+    GB_MAP_MHZ=$lvl
     return 0
   fi
 
@@ -84,25 +100,22 @@ gb_map_floor() {
     i=$((i + 1))
   done
   if [ "$best_level" -lt 0 ]; then
-    first=$(echo $GB_FREQS | awk '{print $1}')
     best_level=0
-    best_freq=$((first / 1000000))
+    best_freq=$GB_TOP_MHZ
   fi
-  echo "$best_level $best_freq"
+  GB_MAP_LEVEL=$best_level
+  GB_MAP_MHZ=$best_freq
   return 0
 }
 
-# 上限语义：目标 -> "level display"
-#   freq 模式: target = MHz，选 <= 目标的最大档
-#   level 模式: target = 档位号
 gb_map_ceil() {
   target=$1
   if [ "$GB_LIST_SRC" = "level" ]; then
     lvl=$target
     case "$lvl" in ''|*[!0-9]*) lvl=0 ;; esac
-    [ "$lvl" -lt 0 ] && lvl=0
     [ "$lvl" -gt "$GB_LEVEL_MAX" ] && lvl=$GB_LEVEL_MAX
-    echo "$lvl $lvl"
+    GB_MAP_LEVEL=$lvl
+    GB_MAP_MHZ=$lvl
     return 0
   fi
 
@@ -121,39 +134,40 @@ gb_map_ceil() {
   done
   if [ "$best_level" -lt 0 ]; then
     best_level=$GB_LEVEL_MAX
-    best_freq=$(gb_level_to_mhz "$best_level")
+    best_freq=$GB_BOTTOM_MHZ
   fi
-  echo "$best_level $best_freq"
+  GB_MAP_LEVEL=$best_level
+  GB_MAP_MHZ=$best_freq
   return 0
 }
 
-# 档位号 -> 显示值（freq 模式为 MHz；level 模式为档位号）
+# 档位号 -> 显示值（结果写入 GB_LEVEL_MHZ）
 gb_level_to_mhz() {
   lvl=$1
   if [ "$GB_LIST_SRC" = "level" ]; then
-    echo "$lvl"
+    GB_LEVEL_MHZ=$lvl
     return 0
   fi
   i=0
   for f in $GB_FREQS; do
     if [ "$i" -eq "$lvl" ]; then
-      echo $((f / 1000000))
+      GB_LEVEL_MHZ=$((f / 1000000))
       return 0
     fi
     i=$((i + 1))
   done
-  echo 0
+  GB_LEVEL_MHZ=0
   return 1
 }
 
-# 最高档显示值
+# 最高档显示值（结果写入 GB_TOP_DISPLAY）
 gb_top_display() {
   if [ "$GB_LIST_SRC" = "level" ]; then
-    echo 0
-    return 0
+    GB_TOP_DISPLAY=0
+  else
+    GB_TOP_DISPLAY=$GB_TOP_MHZ
   fi
-  first=$(echo $GB_FREQS | awk '{print $1}')
-  echo $((first / 1000000))
+  return 0
 }
 
 # 写 min_pwrlevel（节点不存在直接返回 —— 防止空变量展开成 /min_pwrlevel）
@@ -205,8 +219,37 @@ gb_write_maxfreq() {
   echo "$freq" > "$GB_DF/max_freq" 2>/dev/null
 }
 
-# ---- 第三通道: /sys/kernel/gpu（MHz 单位；msm_perf / 性能工具常用）----
-#   8g3 / 8e / 8e5 均存在；节点不存在时静默跳过
+# ---- KGSL 镜像节点（单位：MHz / Hz；节点存在才写）----
+# 不同高通/厂商驱动会暴露其中一部分；8g3 / 8e / 8e5 统一按节点存在性覆盖。
+gb_write_minclock_mhz() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/min_clock_mhz" ] || return 1
+  chmod 644 "$GB_GPU_CLASS/min_clock_mhz" 2>/dev/null
+  echo "$1" > "$GB_GPU_CLASS/min_clock_mhz" 2>/dev/null
+}
+
+gb_write_mingpuclk() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/min_gpuclk" ] || return 1
+  chmod 644 "$GB_GPU_CLASS/min_gpuclk" 2>/dev/null
+  echo "$1" > "$GB_GPU_CLASS/min_gpuclk" 2>/dev/null
+}
+
+gb_write_maxclock_mhz() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/max_clock_mhz" ] || return 1
+  chmod 644 "$GB_GPU_CLASS/max_clock_mhz" 2>/dev/null
+  echo "$1" > "$GB_GPU_CLASS/max_clock_mhz" 2>/dev/null
+}
+
+gb_write_maxgpuclk() {
+  [ -n "$GB_GPU_CLASS" ] || return 1
+  [ -f "$GB_GPU_CLASS/max_gpuclk" ] || return 1
+  chmod 644 "$GB_GPU_CLASS/max_gpuclk" 2>/dev/null
+  echo "$1" > "$GB_GPU_CLASS/max_gpuclk" 2>/dev/null
+}
+
+# ---- /sys/kernel/gpu（MHz；msm_perf / 性能工具常用）----
 gb_write_gpumin() {
   [ -n "$GB_GPU_KERNEL" ] || return 1
   [ -f "$GB_GPU_KERNEL/gpu_min_clock" ] || return 1

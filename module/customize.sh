@@ -1,6 +1,6 @@
 SKIPUNZIP=0
-ui_print "- G750 Boost v2.0.0"
-ui_print "- Snapdragon GPU floor booster (min_pwrlevel)"
+ui_print "- G750 Boost v2.1.2"
+ui_print "- Snapdragon GPU floor booster (min_pwrlevel / min_freq / kernel gpu)"
 ui_print " "
 
 # ============ 处理器识别（GPU 优先，多判据交叉） ============
@@ -48,16 +48,82 @@ if [ $SUPPORT -eq 0 ]; then
 fi
 ui_print "- 默认目标档位: ${DEF}MHz（安装后可在 WebUI 修改）"
 
-# ============ GPU 节点探测（宽松：缺失只警告，不中断） ============
-# 安装环境可能看不到 /sys 节点，或 8e5 等新平台节点路径不同
-# 这里只做提示，真正判定放到开机后运行时自适应
-if [ -e /sys/class/kgsl/kgsl-3d0/min_pwrlevel ]; then
-  ui_print "- 主通道 min_pwrlevel: 可用"
-elif [ -e /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ]; then
-  ui_print "- 主通道 min_pwrlevel: 不可用，将自动回退 min_freq 模式"
+# ============ GPU 节点探测（按实际处理器对应的路径） ============
+# 不同平台节点布局不同，不能固定探测单一路径：
+#   8g3 (SM8650) → <kgsl>/{min_pwrlevel,max_pwrlevel,...}
+#                  + <kgsl>/devfreq/{min_freq,max_freq,available_frequencies}
+#                  + /sys/kernel/gpu/{gpu_min_clock,gpu_max_clock}
+#   8e5 (SM8850) → <kgsl>/{min_pwrlevel,max_pwrlevel,min_clock_mhz,...}
+#                  + /sys/kernel/gpu/{gpu_min_clock,gpu_max_clock}
+#                  （<kgsl>/devfreq 设备存在但无频率节点：gen8 调频由 GMU DCVS 接管，属正常）
+# 做法：直接复用运行时引擎 lib/platform.sh（多路径探测 + 平台自适应），
+#       保证「安装期判定 == 运行期判定」，避免装机时误报。
+if [ -f "$MODPATH/lib/platform.sh" ]; then
+  . "$MODPATH/lib/platform.sh"
+  gb_platform_detect
+  gb_gpu_probe
+fi
+
+ui_print "- 节点探测（按实际平台路径；仅提示，不阻断安装）"
+
+# 通道 1：KGSL 主通道（档位号）
+if [ -n "$GB_GPU_CLASS" ] && [ -f "$GB_GPU_CLASS/min_pwrlevel" ]; then
+  ui_print "    [主通道] $GB_GPU_CLASS/min_pwrlevel"
+  HAVE_MAIN=1
 else
-  ui_print "! 安装环境未检测到 KGSL 节点（可能安装环境受限或平台路径不同）"
-  ui_print "! 已继续安装；开机后由运行时引擎自动重新探测"
+  ui_print "    [主通道] 未找到 min_pwrlevel"
+  HAVE_MAIN=0
+fi
+
+# 通道 2：devfreq 软下限（Hz）
+if [ -n "$GB_DF" ] && [ -f "$GB_DF/min_freq" ]; then
+  ui_print "    [devfreq] $GB_DF/min_freq"
+  HAVE_DF=1
+else
+  HAVE_DF=0
+  _dfdev=""
+  # 优先取 GPU 核心频率设备（*kgsl-3d0*），再退回任意 kgsl 设备
+  for d in /sys/class/devfreq/*kgsl-3d0*; do
+    [ -d "$d" ] && _dfdev=$d
+  done
+  if [ -z "$_dfdev" ]; then
+    for d in /sys/class/devfreq/*kgsl*; do
+      [ -d "$d" ] && _dfdev=$d
+    done
+  fi
+  if [ -n "$_dfdev" ]; then
+    ui_print "    [devfreq] 设备存在（$_dfdev）但无 min_freq 节点"
+    ui_print "              gen8 平台调频由 GMU DCVS 接管，无需该节点（正常）"
+  else
+    ui_print "    [devfreq] 未找到 devfreq 频率节点"
+  fi
+fi
+
+# 通道 3：/sys/kernel/gpu（MHz）
+if [ -n "$GB_GPU_KERNEL" ] && [ -f "$GB_GPU_KERNEL/gpu_min_clock" ]; then
+  ui_print "    [kernel]  $GB_GPU_KERNEL/gpu_min_clock"
+  HAVE_KERNEL=1
+else
+  HAVE_KERNEL=0
+  ui_print "    [kernel]  未找到 gpu_min_clock"
+fi
+
+# 频率表（多路径）
+if [ -n "$GB_FREQ_FILE" ] && [ -r "$GB_FREQ_FILE" ]; then
+  _nfreq=$(wc -w < "$GB_FREQ_FILE" 2>/dev/null)
+  ui_print "    [频率表]  $GB_FREQ_FILE (${_nfreq:-?} 档)"
+else
+  ui_print "    [频率表]  未找到（运行时将降级为档位号模式）"
+fi
+
+# 结论
+if [ "$HAVE_MAIN" = "1" ]; then
+  ui_print "- 接管通道就绪：主通道 min_pwrlevel 可用，重启后即生效"
+elif [ "$HAVE_DF" = "1" ]; then
+  ui_print "- 主通道不可用，将自动使用 devfreq min_freq 回退模式"
+else
+  ui_print "! 安装环境未读到可用的 GPU 频率节点"
+  ui_print "! 已继续安装；开机后由运行时引擎按实际路径重新探测"
 fi
 
 # ============ 音量键确认 ============

@@ -1,7 +1,7 @@
 # G750 Boost — Snapdragon GPU Game Floor Module
 
 **Author**: 雨色
-**Version**: v2.1.1
+**Version**: v2.1.2
 **Supported SoCs**: SM8650 (8 Gen3 / Adreno 750) · SM8750 (8 Elite / Adreno 830) · SM8850 (8 Elite Gen5 / Adreno 840)
 **Compatible with**: KernelSU / Magisk / APatch
 
@@ -44,6 +44,16 @@
 Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to save power. In games this causes frame-time jitter and occasional stutters. This module raises the GPU **floor** only while a target game runs, and guards the ceiling against vendor game stacks that rewrite it.
 
 ---
+
+## v2.1.2 highlights
+
+| Feature | Description |
+|---|---|
+| **Platform-aware installer probe** | Installer reuses the runtime engine (`lib/platform.sh`); on 8e5 it no longer falsely reports "no KGSL node" — devfreq shell is explained as normal (GMU DCVS) |
+| **Zero-fork hot path** | Node reads/writes, config parsing and PID checks use shell builtins only (`read`/`echo`/`$SECONDS`); in-game poll unified at **0.3 s** (measured ~73 µs per cycle incl. all 6 guards → CPU < 0.02%, still cheaper than the old 1 s loop with ~30 forks) |
+| **Ceiling guard at the same rate** | `max_pwrlevel` / `max_freq` / `max_gpuclk` / `gpu_max_clock` all checked every 0.3 s — a lowered ceiling is restored within 0.3 s |
+| **Write-on-change state files** | `state/` files are only written when targets change (less IO at 0.3 s cadence) |
+| **WebUI footer version fixed** | |
 
 ## v2.1.1 highlights
 
@@ -107,7 +117,7 @@ Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to sav
 ## Install
 
 ```text
-1. Flash g750-boost_v2.1.1.zip in KernelSU / Magisk / APatch
+1. Flash g750-boost_v2.1.2.zip in KernelSU / Magisk / APatch
 2. Confirm with the volume key (Vol+ = install / Vol- = cancel / 15s timeout = install)
 3. Reboot
 4. Open WebUI: http://127.0.0.1:8778
@@ -188,7 +198,7 @@ Example: target 700 MHz → no exact entry → 720 MHz (smallest ≥ 700)
 - **Floor channels**: `min_pwrlevel` (primary) · `devfreq/min_freq` (soft, 8g3) · `/sys/kernel/gpu/gpu_min_clock`
 - **Ceiling guard**: `max_pwrlevel` · `max_gpuclk` · `/sys/kernel/gpu/gpu_max_clock` · `devfreq/max_freq`
 - **Floor index**: `level = index in the frequency table` (descending; smaller index = higher floor)
-- **In-game check interval**: 1 s (read-only; writes only when the value drifts)
+- **In-game check interval**: 0.3 s (zero-fork builtins; writes only when the value drifts)
 - **Process management**: monitor process tree is cleaned on start and on exit — no orphan accumulation
 - **Recovery**: default saved at start (`num_pwrlevels - 1`); restored on exit / disable / uninstall / crash (trap); stale state cleaned on next start
 
