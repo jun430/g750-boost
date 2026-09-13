@@ -1,7 +1,7 @@
 # G750 Boost — Snapdragon GPU Game Floor Module
 
 **Author**: 雨色
-**Version**: v2.1.2
+**Version**: v2.1.4
 **Supported SoCs**: SM8650 (8 Gen3 / Adreno 750) · SM8750 (8 Elite / Adreno 830) · SM8850 (8 Elite Gen5 / Adreno 840)
 **Compatible with**: KernelSU / Magisk / APatch
 
@@ -44,6 +44,26 @@
 Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to save power. In games this causes frame-time jitter and occasional stutters. This module raises the GPU **floor** only while a target game runs, and guards the ceiling against vendor game stacks that rewrite it.
 
 ---
+
+## v2.1.4 highlights
+
+| Feature | Description |
+|---|---|
+| **WebUI level-snapping (fix)** | The dropdown now highlights options **by level index**. Previously it matched by MHz value — when the configured value was absent from the device table (e.g. the default `680` on 8e5), **no option matched and the browser silently selected the first one (= highest frequency)**, pinning the floor to 1200 MHz on save |
+| **Snap on save** | Values pass through `gb_map_floor` / `gb_map_ceil` before being written, so **the stored value is always a real device level** and will always match next time |
+| **Effective value reported** | The UI shows the **effective value + level index** instead of the raw request; snapping/clamping is called out; the form re-reads after saving |
+| **Browser fallback channel fixed** | `main.js: sh()` did not substitute `__MODPATH__` on the non-KSU path, so the path regex failed and **`config.sh` reads/writes were silently downgraded to `status.sh`** (empty dropdown, saves that did nothing) |
+| **Unified frequency-table ordering (cross-SoC)** | `available_frequencies` is not guaranteed to be descending (devfreq tables are often ascending). Now normalised with `sort -nr` so **index 0 = highest frequency = pwrlevel 0**, plus an entry-count check against `num_pwrlevels` |
+| **Window consistency guard** | If the ceiling level is higher than the floor level (empty range), the floor is aligned to the ceiling (equivalent to frequency locking), with an explicit notice |
+| **New status row: Floor level n / N** | Shows the hardware `min_pwrlevel` directly |
+
+## v2.1.3 highlights
+
+| Feature | Description |
+|---|---|
+| **Event-driven game detection** | `proc_monitor.sh` listens to `am_proc_start` / `am_proc_died` and writes `state/game_proc`; the main loop reads that state instead of running `pidof` every cycle |
+| **Startup fallback scan kept** | A target game already running at boot is still detected |
+| **Unified package-name source in WebUI** | Status / config / log all read `state/game_proc` |
 
 ## v2.1.2 highlights
 
@@ -117,7 +137,7 @@ Qualcomm's GPU governor (`msm-adreno-tz`) aggressively downclocks the GPU to sav
 ## Install
 
 ```text
-1. Flash g750-boost_v2.1.2.zip in KernelSU / Magisk / APatch
+1. Flash g750-boost_v2.1.4.zip in KernelSU / Magisk / APatch
 2. Confirm with the volume key (Vol+ = install / Vol- = cancel / 15s timeout = install)
 3. Reboot
 4. Open WebUI: http://127.0.0.1:8778
@@ -142,6 +162,7 @@ Open `http://127.0.0.1:8778`.
 ```text
 SoC         8 Gen3 (Adreno750)
 Live floor  680 MHz     ← actual kernel floor
+Floor level  4 / 11      ← hardware min_pwrlevel
 Target      680 MHz     ← your configured floor
 Current     720 MHz     ← real-time GPU frequency
 Max         903 MHz     ← ceiling (guarded)
@@ -154,7 +175,7 @@ Temp        45 °C
 ```text
 [Dropdown] Target floor:   903 / 834 / 770 / 720 / 680 / 629 / ... / 231 MHz
 [Dropdown] Ceiling:        0 = unlimited / or an explicit frequency
-[Save]     → write config → daemon hot-reloads within 5s
+[Save]     → snapped to a real device level → written → applied within 0.3 s while a game runs
 ```
 
 ---
@@ -185,10 +206,24 @@ Add your own by editing `/data/adb/modules/g750-boost/games.txt` (one package pe
 
 ### Floor mapping rule
 
-If the target frequency has no exact entry, the module picks the **smallest entry ≥ target** (performance-leaning).
+### Frequency-table normalisation
+
+`available_frequencies` ordering is **not guaranteed** across SoCs (devfreq tables are often ascending).
+The module normalises the table to **descending** order so that `index 0` always means the highest
+frequency = `pwrlevel 0`, and cross-checks the entry count against `num_pwrlevels`.
+
+### Floor mapping rule
+
+If the target frequency has no exact entry:
+
+- **Floor**: pick the **smallest entry ≥ target** (performance-leaning)
+- **Ceiling**: pick the **largest entry ≤ target** (never above what you asked for)
+
+The **snapped** value is what gets written to the config, so the WebUI always displays a real device level.
 
 ```text
-Example: target 700 MHz → no exact entry → 720 MHz (smallest ≥ 700)
+Example: floor 700 MHz → no exact entry → 720 MHz (smallest ≥ 700)
+         ceiling 400 MHz → no exact entry → 366 MHz (largest ≤ 400)
 ```
 
 ---
