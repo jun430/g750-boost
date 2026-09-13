@@ -28,7 +28,12 @@ async function sh(cmd) {
     await detectPath();
     return ksuExecAsync(cmd.replace(/__MODPATH__/g, MODPATH));
   }
-  const rel = cmd.replace(/^sh\s+\/data\/adb\/modules[_update]*\/g750-boost\//, "");
+  // 浏览器降级通道：必须先做同样的路径替换。
+  // 否则 __MODPATH__ 原样残留 → 下面的正则匹配失败 → 所有调用
+  // （包括 config.sh 的读/存）都会被静默降级成 status.sh，
+  // 表现为"下拉框没有档位 / 保存了但没生效"。
+  const flat = cmd.replace(/__MODPATH__/g, MOD_CANDIDATES[0]);
+  const rel = flat.replace(/^sh\s+\/data\/adb\/modules[_update]*\/g750-boost\//, "");
   const m = rel.match(/^cgi\/([\w.]+\.sh)\s*(.*)$/);
   const script = m ? m[1] : "status.sh";
   const args = m && m[2].trim() ? "?" + m[2].trim().split(/\s+/).map(a => encodeURIComponent(a)).join("&") : "";
@@ -66,6 +71,12 @@ async function refreshStatus({ silent = true } = {}) {
       $("#sGame").textContent = "空闲";
     }
     $("#sTemp").textContent = (j.temp === undefined || j.temp === null) ? "-- °C" : (j.temp + " °C");
+    const elLvl = $("#sFloorLvl");
+    if (elLvl) {
+      elLvl.textContent = (j.pwrlevel === undefined || j.pwrlevel === null)
+        ? "--"
+        : ("档位 " + j.pwrlevel + ((j.num_levels ? " / " + (j.num_levels - 1) : "")));
+    }
     $("#sLiveFloor").style.color = (j.game === "yes" && j.live_floor === j.floor_mhz) ? "var(--acc)" : "";
   } catch (e) { if (!silent) toast("刷新失败: " + e.message); }
 }
@@ -80,32 +91,47 @@ async function loadConfig() {
     LIST_UNIT = j.unit || "MHz";
     const sel = $("#selFloor");
     const selC = $("#selCeil");
+
+    // 关键：按【档位下标】命中，而不是按 MHz 值匹配。
+    // 按值匹配在"配置值不在设备频表里"时一个 option 都命中不了，
+    // 浏览器会静默选中第一项（= 最高频），与用户意图完全相反。
+    const floorLvl = (typeof j.floor_level === "number" && j.floor_level >= 0) ? j.floor_level : -1;
+    const ceilLvl  = (typeof j.ceil_level  === "number" && j.ceil_level  >= 0) ? j.ceil_level  : -1;
+
     if (sel && list.length) {
       sel.innerHTML = "";
-      for (const v of list) {
+      list.forEach((v, i) => {
         const o = document.createElement("option");
         o.value = v;
-        o.textContent = labelVal(v);
-        if (v == j.floor) o.selected = true;
+        o.textContent = labelVal(v) + " · 档位 " + i;
+        if (i === floorLvl) o.selected = true;
         sel.appendChild(o);
-      }
+      });
     }
     if (selC && list.length) {
       selC.innerHTML = "";
       const oTop = document.createElement("option");
       oTop.value = 0;
       oTop.textContent = "不限制（最高 " + labelVal(list[0]) + "）";
-      if (!j.ceil || j.ceil == 0) oTop.selected = true;
+      if (ceilLvl < 0) oTop.selected = true;
       selC.appendChild(oTop);
-      for (const v of list) {
+      list.forEach((v, i) => {
         const o = document.createElement("option");
         o.value = v;
-        o.textContent = labelVal(v);
-        if (j.ceil && j.ceil == v) o.selected = true;
+        o.textContent = labelVal(v) + " · 档位 " + i;
+        if (i === ceilLvl) o.selected = true;
         selC.appendChild(o);
-      }
+      });
     }
-    if (sel) $("#saveHint").textContent = "当前地板 " + labelVal(j.floor) + " · 上限 " + ((!j.ceil || j.ceil == 0) ? "不限制" : labelVal(j.ceil));
+
+    const effFloor = (j.floor_eff === undefined) ? j.floor : j.floor_eff;
+    const effCeil  = (j.ceil_eff  === undefined) ? j.ceil  : j.ceil_eff;
+    const ceilTxt = (ceilLvl < 0) ? "不限制" : labelVal(effCeil);
+    let hint = "当前地板 " + labelVal(effFloor) + "（档位 " + floorLvl + "）· 上限 " + ceilTxt;
+    if (j.floor_mismatch || j.ceil_mismatch || j.list_mismatch) {
+      hint = "⚠ 配置值与设备档位不一致 —— " + hint + "。点「保存档位」会自动吸附到设备真实档位。";
+    }
+    if (sel) $("#saveHint").textContent = hint;
   } catch (e) { console.log("loadConfig failed: " + e); }
 }
 
@@ -116,12 +142,30 @@ async function saveCfg() {
   const floor = selF.value;
   const ceil = selC ? selC.value : 0;
   const r = await sh("sh __MODPATH__/cgi/config.sh save " + floor + " " + ceil);
-  let ok = false, f = floor, c = ceil;
-  try { const j = JSON.parse(r.stdout); ok = !!j.ok; f = j.floor || floor; c = (j.ceil === undefined ? ceil : j.ceil); } catch (e) {}
+  let ok = false, f = floor, c = ceil, fl = null, cl = null, fclamp = 0;
+  try {
+    const j = JSON.parse(r.stdout);
+    ok = !!j.ok;
+    f = (j.floor === undefined) ? floor : j.floor;      // 后端【吸附后】的值
+    c = (j.ceil  === undefined) ? ceil  : j.ceil;
+    fl = (j.floor_level === undefined) ? null : j.floor_level;
+    cl = (j.ceil_level  === undefined) ? null : j.ceil_level;
+    fclamp = j.floor_clamped || 0;
+  } catch (e) {}
   if (ok) {
     const ceilTxt = (!c || c == 0) ? "不限制" : labelVal(c);
-    $("#saveHint").textContent = "已保存 地板 " + labelVal(f) + " · 上限 " + ceilTxt + "（5 秒内生效）";
-    toast("已保存 地板" + labelVal(f) + " / 上限" + ceilTxt);
+    let msg = "已保存并生效：地板 " + labelVal(f)
+            + (fl !== null ? "（档位 " + fl + "）" : "")
+            + " · 上限 " + ceilTxt + (cl !== null && cl >= 0 ? "（档位 " + cl + "）" : "");
+    if (String(f) !== String(floor) || String(c) !== String(ceil)) {
+      msg += " ｜已自动吸附到设备真实档位";
+    }
+    if (fclamp) {
+      msg += "。⚠ 上限档位高于地板，窗口为空，地板已对齐上限（等效锁频）";
+    }
+    $("#saveHint").textContent = msg;
+    toast("已保存 地板 " + labelVal(f) + " / 上限 " + ceilTxt);
+    await loadConfig();   // 回读生效值，让下拉框停在真实档位上
   } else {
     $("#saveHint").textContent = "保存失败，请重试";
     toast("保存失败");

@@ -10,6 +10,7 @@
 # 加载档位列表
 gb_load_freqs() {
   GB_LIST_SRC=none
+  GB_LIST_MISMATCH=0
   GB_LEVEL_MAX=-1
   GB_FREQS=""
   GB_TOP_HZ=0
@@ -26,11 +27,15 @@ gb_load_freqs() {
     if [ -n "$raw" ]; then
       # 单位归一化：< 100000 视为 MHz，否则视为 Hz
       if [ "$first" -lt 100000 ]; then
-        GB_FREQS=$(echo $raw | awk '{for(i=1;i<=NF;i++) printf "%d ", $i*1000000}')
+        GB_FREQS=$(echo $raw | awk '{for(i=1;i<=NF;i++) printf "%d\n", $i*1000000}')
       else
-        GB_FREQS=$raw
+        GB_FREQS=$(echo $raw | tr ' ' '\n')
       fi
-      GB_LIST_SRC=freq
+      # 顺序归一化：强制降序，保证 index0 = 最高频 = KGSL pwrlevel 0。
+      # 各 SoC 的 available_frequencies 顺序不保证（devfreq 表常见升序），
+      # 不归一化会让"显示的档位"与"实际 pwrlevel 下标"整体错位。
+      GB_FREQS=$(printf '%s\n' $GB_FREQS | tr -d '\r' | grep -E '^[0-9]+$' | sort -nr | tr '\n' ' ')
+      [ -n "$GB_FREQS" ] && GB_LIST_SRC=freq
     fi
   fi
 
@@ -44,6 +49,15 @@ gb_load_freqs() {
     GB_LEVEL_MAX=$((n - 1))
     GB_TOP_MHZ=$((GB_TOP_HZ / 1000000))
     GB_BOTTOM_MHZ=$((GB_BOTTOM_HZ / 1000000))
+    # 与 num_pwrlevels 对齐校验：条目数不一致 → 这张表不是 pwrlevel 表，
+    # WebUI 应据此提示"档位可能错位"，而不是静默按下标处理。
+    if [ -n "$GB_GPU_CLASS" ] && [ -f "$GB_GPU_CLASS/num_pwrlevels" ]; then
+      _np=$(cat "$GB_GPU_CLASS/num_pwrlevels" 2>/dev/null)
+      case "$_np" in
+        ''|*[!0-9]*) ;;
+        *) [ "$_np" -ne "$n" ] && GB_LIST_MISMATCH=1 ;;
+      esac
+    fi
     return 0
   fi
 

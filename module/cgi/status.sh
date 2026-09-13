@@ -19,6 +19,9 @@ platform_name="${GB_PLATFORM_NAME:-unknown}"
 
 freqs=$(cat "$GB_FREQ_FILE" 2>/dev/null)
 [ -z "$freqs" ] && freqs=$(cat "$DF/available_frequencies" 2>/dev/null)
+# 顺序归一化：与 lib/freq.sh 口径一致，强制降序（index0 = 最高频）。
+# 否则"由 min_pwrlevel 反查 MHz"会在某些平台（表为升序）整体错位。
+freqs=$(printf '%s\n' $freqs | tr -d '\r' | grep -E '^[0-9]+$' | sort -nr | tr '\n' ' ')
 min=$(awk '{printf "%d", $1/1000000}' "$DF/min_freq" 2>/dev/null)
 cur=$(awk '{printf "%d", $1/1000000}' "$DF/cur_freq" 2>/dev/null)
 max=$(awk '{printf "%d", $1/1000000}' "$DF/max_freq" 2>/dev/null)
