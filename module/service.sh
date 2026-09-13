@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# G750 Boost service.sh v2.1.2
+# G750 Boost service.sh v2.1.5
 # - 游戏地板档位接管（min_pwrlevel 主通道 / min_freq 回退通道）
 # - 上限档位（max_pwrlevel）常驻保护，防止其他模块/应用拉低
 # - 平台自适配: SM8650 / SM8750 / SM8850（运行时探测，不硬编码）
@@ -381,7 +381,7 @@ guard_ceiling() {
 }
 
 # ================= 启动 =================
-log "=== g750-boost v2.1.3 start pid=$$ ==="
+log "=== g750-boost v2.1.5 start pid=$$ ==="
 
 GB_GPU_CACHE_FILE=$GPU_PATH_CACHE
 gb_gpu_probe
@@ -415,7 +415,9 @@ done
 sleep 3
 
 # WebUI 服务（自带单实例锁）
-nohup sh "$MODDIR/webdaemon.sh" >/dev/null 2>&1 &
+# v2.1.5: 用 setsid 让 webdaemon 进入独立会话 —— 否则它与 service.sh 同会话，
+# service.sh 被终端/进程组清理时 webdaemon 一起死，自愈守护就失效了。
+setsid sh "$MODDIR/webdaemon.sh" >/dev/null 2>&1 < /dev/null &
 
 # 安全模式：未知平台 或 无可用 GPU 节点
 if [ "$GB_SUPPORTED" != "1" ] || [ "$GB_GPU_MODE" = "none" ]; then
@@ -478,6 +480,7 @@ STATE=idle
 #   - 时间用 mksh 内置 $SECONDS（单调秒）做进程内节拍；仅在写 state/last_seen 时取 epoch
 # 状态文件只在目标变化时写（避免游戏 0.3s 时每轮 4 次写文件）
 NOW=0
+MP_FAILS=0
 FLOOR_LVL=0
 FLOOR_MHZ=0
 CEIL_LVL=0
@@ -568,6 +571,23 @@ while :; do
     [ "$FLOOR_MHZ" = "$STATE_MHZ" ] || { echo "$FLOOR_MHZ" > "$STATE_DIR/floor_mhz";  STATE_MHZ=$FLOOR_MHZ; }
     [ "$CEIL_LVL" = "$STATE_CEIL_LVL" ] || { echo "$CEIL_LVL" > "$STATE_DIR/ceil_level";  STATE_CEIL_LVL=$CEIL_LVL; }
     [ "$CEIL_MHZ" = "$STATE_CEIL_MHZ" ] || { echo "$CEIL_MHZ" > "$STATE_DIR/ceil_mhz";    STATE_CEIL_MHZ=$CEIL_MHZ; }
+  fi
+
+  # ---- v2.1.5: proc_monitor 看护（事件源不能死，否则游戏识别退化为 5s 兜底）----
+  if [ -n "$MONITOR_PID" ]; then
+    if [ -d "/proc/$MONITOR_PID" ]; then
+      MP_FAILS=0
+    else
+      MP_FAILS=$((MP_FAILS + 1))
+      # 退避：启动即失败时不疯狂拉起（前 3 次立即重试，之后每 20 轮一次 ≈ 6s/20轮）
+      if [ "$MP_FAILS" -le 3 ] || [ $((MP_FAILS % 20)) -eq 0 ]; then
+        kill_monitor_tree
+        sh "$MODDIR/proc_monitor.sh" "$MODDIR" "$STATE_DIR" "$LOG" &
+        MONITOR_PID=$!
+        echo "$MONITOR_PID" > "$STATE_DIR/monitor_pid"
+        log "proc monitor respawn pid=$MONITOR_PID (fail #$MP_FAILS)"
+      fi
+    fi
   fi
 
   # ---- 游戏检测：读事件缓存（proc_monitor 写/删），每轮 0 fork ----

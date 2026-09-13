@@ -74,6 +74,27 @@ fi
 echo "$TZ" > "$TZ_CACHE" 2>/dev/null
 temp=$(awk '{printf "%d", $1/1000}' "$TZ/temp" 2>/dev/null)
 
+# ---- v2.1.5: 配置目标（读 config/settings.conf，不依赖 state）----
+# cfg_*  = "你保存的目标"（非游戏态也准确）
+# state/*= "当前生效"（service 运行态缓存；仅游戏态刷新）
+cfg_floor=$(grep '^game_floor_mhz=' "$MODDIR/config/settings.conf" 2>/dev/null | tail -n 1 | cut -d= -f2)
+case "$cfg_floor" in ''|*[!0-9]*) cfg_floor=0 ;; esac
+cfg_ceil=$(grep '^game_ceil_mhz=' "$MODDIR/config/settings.conf" 2>/dev/null | tail -n 1 | cut -d= -f2)
+case "$cfg_ceil" in ''|*[!0-9]*) cfg_ceil=0 ;; esac
+
+# 档位号反查（freqs 为降序 Hz 表），语义与 lib/freq.sh 的 gb_map_floor/ceil 对齐：
+#   floor: 取 >= 目标的最小档（表中最后一个 >= 目标项）
+#   ceil : 取 <= 目标的最大档（表中第一个 <= 目标项）；ceil=0 → -1（不限制）
+cfg_floor_level=-1
+cfg_ceil_level=-1
+if [ -n "$freqs" ]; then
+  cfg_floor_level=$(echo $freqs | awk -v t="$cfg_floor" '{b=-1; for(i=1;i<=NF;i++) if($i/1000000>=t) b=i-1; print b}')
+  [ "$cfg_floor_level" = "-1" ] && cfg_floor_level=0
+  if [ "$cfg_ceil" != "0" ]; then
+    cfg_ceil_level=$(echo $freqs | awk -v t="$cfg_ceil" '{b=-1; for(i=1;i<=NF;i++) if($i/1000000<=t){b=i-1;break} print b}')
+  fi
+fi
+
 pwrlevel=$(cat "$GPU/min_pwrlevel" 2>/dev/null)
 num_levels=$(cat "$GPU/num_pwrlevels" 2>/dev/null)
 orig_level=$(cat "$STATE_DIR/orig_level" 2>/dev/null)
@@ -99,5 +120,5 @@ esac
 json_escape() { printf '%s' "$1" | sed 's/[\\]/\\\\/g; s/"/\\"/g'; }
 process=$(json_escape "$process")
 
-printf '{"soc":"%s","platform":"%s","mode":"%s","min":%s,"cur":%s,"max":%s,"pwrlevel":%s,"num_levels":%s,"orig_level":%s,"floor_level":%s,"floor_mhz":%s,"ceil_level":%s,"ceil_mhz":%s,"live_floor":%s,"game":"%s","state":"%s","process":"%s","monitor":"%s","temp":%s}' \
-  "$soc" "$platform_name" "${GB_GPU_MODE:-none}" "${min:-0}" "${cur:-0}" "${max:-0}" "${pwrlevel:-0}" "${num_levels:-0}" "${orig_level:-0}" "${floor_level:-0}" "${floor_mhz:-0}" "${ceil_level:-0}" "${ceil_mhz:-0}" "${live_floor:-0}" "${game:-no}" "${state:-idle}" "$process" "$monitor" "${temp:-0}"
+printf '{"soc":"%s","platform":"%s","mode":"%s","min":%s,"cur":%s,"max":%s,"pwrlevel":%s,"num_levels":%s,"orig_level":%s,"floor_level":%s,"floor_mhz":%s,"ceil_level":%s,"ceil_mhz":%s,"live_floor":%s,"cfg_floor_mhz":%s,"cfg_floor_level":%s,"cfg_ceil_mhz":%s,"cfg_ceil_level":%s,"game":"%s","state":"%s","process":"%s","monitor":"%s","temp":%s}' \
+  "$soc" "$platform_name" "${GB_GPU_MODE:-none}" "${min:-0}" "${cur:-0}" "${max:-0}" "${pwrlevel:-0}" "${num_levels:-0}" "${orig_level:-0}" "${floor_level:-0}" "${floor_mhz:-0}" "${ceil_level:-0}" "${ceil_mhz:-0}" "${live_floor:-0}" "${cfg_floor:-0}" "${cfg_floor_level:--1}" "${cfg_ceil:-0}" "${cfg_ceil_level:--1}" "${game:-no}" "${state:-idle}" "$process" "$monitor" "${temp:-0}"

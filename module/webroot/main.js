@@ -59,6 +59,15 @@ async function refreshStatus({ silent = true } = {}) {
     const j = JSON.parse(await (await sh("sh __MODPATH__/cgi/status.sh")).stdout);
     $("#sPlatform").textContent = j.platform || "--";
     $("#sLiveFloor").textContent = fmtMHz(j.live_floor);
+    // v2.1.5: 把"目标地板"拆成两组，避免"配置值 vs 运行态缓存"混淆：
+    //   配置目标 = cfg_floor_mhz（status.sh 直接从 config 现算，非游戏态也准确）
+    //   当前生效 = floor_mhz    （state 缓存，仅游戏态刷新）
+    const elCfg = $("#sCfgFloor");
+    if (elCfg) {
+      const cl = (typeof j.cfg_floor_level === "number" && j.cfg_floor_level >= 0)
+        ? (" · 档位 " + j.cfg_floor_level) : "";
+      elCfg.textContent = fmtMHz(j.cfg_floor_mhz) + cl;
+    }
     $("#sFloor").textContent = fmtMHz(j.floor_mhz);
     $("#sCeil").textContent = fmtMHz(j.ceil_mhz);
     $("#sCur").textContent = fmtMHz(j.cur);

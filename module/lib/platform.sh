@@ -137,6 +137,10 @@ gb_gpu_probe() {
       GB_FREQ_FILE=$GB_GPU_CLASS/gpu_available_frequencies
     elif [ -n "$GB_GPU_CLASS" ] && [ -f "$GB_GPU_CLASS/freq_table_mhz" ]; then
       GB_FREQ_FILE=$GB_GPU_CLASS/freq_table_mhz
+    elif [ -f /sys/kernel/gpu/gpu_freq_table ]; then
+      # v2.1.5 兜底：gen8（8e5 等）kgsl class 目录在部分机型不暴露频表节点，
+      # 但 /sys/kernel/gpu 侧通常仍有一份 MHz 表。freq.sh 按 <100000 判定为 MHz 归一化。
+      GB_FREQ_FILE=/sys/kernel/gpu/gpu_freq_table
     fi
 
     _core_df=""
