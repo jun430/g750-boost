@@ -1,19 +1,297 @@
-:root{--bg:#0b0f14;--card:#121821;--line:#1e2836;--txt:#e6edf3;--dim:#7d8a99;--acc:#00e5c3}
+/* G750 Boost WebUI v2.2.0 — 液态玻璃 / 双主题 / 壁纸层 / 响应式 */
+/* 变量体系：沿用原 6 个（--bg --card --line --txt --dim --acc）+ 玻璃与壁纸扩展 */
+
+:root{
+  --wall-op:0.35;                     /* 壁纸透明度 0~1，由滑杆与 wall.sh get 同步 */
+  --wall-img:none;                    /* 无壁纸 → none，不改变默认观感 */
+  --glass-bg:rgba(255,255,255,.28);   /* v3.2：0.55 → 0.28，玻璃更透 */
+  --glass-brd:rgba(255,255,255,.55);
+  --glassA:0.5;                       /* v2.2.5：玻璃 alpha（0~1），由「玻璃透明度」滑杆换算（越高越透 → alpha 越小）；0.5 对应默认 50%，100% → 0 完全透明 */
+  --glassBlur:24px;                   /* v2.2.5：玻璃模糊半径，由「玻璃模糊」滑杆控制（作用于底部浮动按钮） */
+  /* v2.2.9 派生量：让「玻璃透明度 100%」时所有面板都真正全透，不留残留白底。
+     原实现用 calc(var(--glassA) + .18/.25) 做「比卡片略实」，导致 glassA=0 时仍有 18%~25% 白底 → 看着就是「有遮挡」。
+     改为按 alpha 等比缩放：glassA=0.5 时的观感与原来一致（.5*1.36=.68、.5*1.5=.75），glassA=0 时归零。 */
+  --glassA-soft:min(1, calc(var(--glassA) * 1.36));    /* 次要面板（日志框） */
+  --glassA-strong:min(1, calc(var(--glassA) * 1.5));   /* 输入控件（保可读性） */
+  /* 卡片磨砂半径（v2.2.9 调弱）：系数 0.10 → 默认 24px 时约 2.4px。
+     原为 0.34（≈8px），实测磨砂本身就会把卡片区域内的壁纸糊成「一片灰雾」，
+     即使卡片背景 alpha 已为 0（玻璃 100%）也仍显得像遮挡，故大幅调弱到约 10%。 */
+  --glassBlurCard:min(40px, calc(var(--glassBlur) * .1));
+  --glass-rgb:255,255,255;            /* 玻璃底色（随主题切换） */
+  --radius:14px;
+  --fab-gap:14px;
+}
+
+/* light 为默认主题：白底黑字 */
+:root[data-theme="light"]{
+  --bg:#f7f8fa; --card:rgba(255,255,255,.72); --line:#e3e6ea;
+  --txt:#14181d; --dim:#6b7480; --acc:#00a389;
+  --glass-bg:rgba(255,255,255,.28); --glass-brd:rgba(255,255,255,.55);
+  --glass-rgb:255,255,255;
+  --inset:rgba(255,255,255,.9);
+  --logbg:#ffffff; --logfg:#3c4652; --okbg:#e6f7ef; --okfg:#0d7a5f;
+  --badbg:#fdeceb; --badfg:#b3352c;
+}
+:root[data-theme="dark"]{
+  --bg:#0b0f14; --card:rgba(18,24,33,.72); --line:#1e2836;
+  --txt:#e6edf3; --dim:#7d8a99; --acc:#00e5c3;
+  --glass-bg:rgba(18,24,33,.30); --glass-brd:rgba(255,255,255,.18);
+  --inset:rgba(255,255,255,.06);
+  --logbg:#05080c; --logfg:#9fb3c8; --okbg:#12331f; --okfg:#8fe8b0;
+  --badbg:#3a1c1a; --badfg:#ff9a90;
+}
+/* auto：跟随系统（默认浅色，系统深色时套用 dark 变量） */
+:root[data-theme="auto"]{
+  --bg:#f7f8fa; --card:rgba(255,255,255,.72); --line:#e3e6ea;
+  --txt:#14181d; --dim:#6b7480; --acc:#00a389;
+  --glass-bg:rgba(255,255,255,.28); --glass-brd:rgba(255,255,255,.55);
+  --inset:rgba(255,255,255,.9);
+  --logbg:#ffffff; --logfg:#3c4652; --okbg:#e6f7ef; --okfg:#0d7a5f;
+  --badbg:#fdeceb; --badfg:#b3352c;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-theme="auto"]{
+    --bg:#0b0f14; --card:rgba(18,24,33,.72); --line:#1e2836;
+    --txt:#e6edf3; --dim:#7d8a99; --acc:#00e5c3;
+    --glass-bg:rgba(18,24,33,.30); --glass-brd:rgba(255,255,255,.18);
+    --inset:rgba(255,255,255,.06);
+    --logbg:#05080c; --logfg:#9fb3c8; --okbg:#12331f; --okfg:#8fe8b0;
+    --badbg:#3a1c1a; --badfg:#ff9a90;
+  }
+}
+
+/* 玻璃底色：按主题区分（追加在后，覆盖上面的默认值） */
+:root[data-theme="light"],:root[data-theme="auto"]{--glass-rgb:255,255,255}
+:root[data-theme="dark"]{--glass-rgb:18,24,33}
+@media (prefers-color-scheme: dark){
+  :root[data-theme="auto"]{--glass-rgb:18,24,33}
+}
+
+/* file input 视觉隐藏（禁用 hidden 属性：display:none 会让部分 WebView 的 click() 唤不起相册） */
+.filehide{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
+
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:radial-gradient(900px 500px at 50% -10%,#0e1a24,var(--bg) 60%);color:var(--txt);font:14px/1.5 -apple-system,"MiSans",Roboto,sans-serif}
-#app{max-width:480px;margin:0 auto;padding:12px 14px}
+html{-webkit-text-size-adjust:100%}
+/* 背景放 html（canvas 层），body 不设背景 ——
+   这样 body::before 的壁纸层（z-index:-1）不会被 body 自身的背景/渐变遮挡 */
+html{
+  /* 不放 background-attachment:fixed —— html 背景本身就会传播到 canvas 且不随内容滚动，
+     加 fixed 一旦解析失败会整条失效（只剩底色）。保持最简写法最稳。 */
+  background:radial-gradient(900px 500px at 50% -10%, var(--inset), var(--bg) 60%);
+  background-color:var(--bg);
+}
+body{
+  background:transparent;
+  color:var(--txt);
+  font:14px/1.5 -apple-system,"MiSans",Roboto,sans-serif;
+  overflow-x:hidden;
+  min-height:100vh;
+}
+
+/* 壁纸层：置于内容之下，无壁纸时自动隐藏 */
+body::before{
+  content:"";position:fixed;inset:0;z-index:-1;
+  background-image:var(--wall-img,none);
+  background-size:cover;background-position:center;background-repeat:no-repeat;
+  opacity:var(--wall-op,0);
+  transition:opacity .2s;
+}
+
+#app{
+  max-width:480px;margin:0 auto;
+  /* v3.2：底部为浮动按钮组，预留更高留白，避免内容被遮挡 */
+  padding:12px 14px calc(80px + env(safe-area-inset-bottom) + 12px);
+}
 header{display:flex;align-items:center;justify-content:space-between;padding:6px 2px 12px}
 h1{font-size:17px}h1 b{color:var(--acc)}
 .badge{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:3px 10px;border-radius:99px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
-.row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.tag{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:2px 8px;border-radius:99px}
+
+.grid{display:block}
+
+.card{
+  background:rgba(var(--glass-rgb), var(--glassA));
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  padding:14px;margin-bottom:12px;
+  /* v2.2.9：原来这里硬编码 blur(8px)，导致「玻璃模糊」滑杆调 0 时卡片仍在磨砂壁纸。
+     改为跟随滑杆：--glassBlurCard = --glassBlur * 0.1（24px → 2.4px；0 → 完全清晰）。 */
+  -webkit-backdrop-filter:blur(var(--glassBlurCard,8px)) saturate(140%);
+  backdrop-filter:blur(var(--glassBlurCard,8px)) saturate(140%);
+  min-width:0;
+}
+.row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px;min-width:0}
 .row:last-child{border:none}
-.row span{color:var(--dim)}
-.row b{font-variant-numeric:tabular-nums}
-.btn{width:100%;padding:10px;border-radius:10px;border:1px solid #155e52;background:linear-gradient(135deg,#0c3f37,#0b2c46);color:var(--acc);font-size:14px;font-weight:600;margin-bottom:12px;cursor:pointer}
-.mini{padding:4px 12px;font-size:12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--acc);cursor:pointer}
-.loghead{display:flex;justify-content:space-between;align-items:center;font-size:13px}
-.logview{background:#05080c;border:1px solid var(--line);border-radius:10px;padding:10px;font:11px/1.6 monospace;color:#9fb3c8;max-height:300px;overflow:auto;margin-top:10px;white-space:pre-wrap;word-break:break-all}
-footer{text-align:center;font-size:11px;color:#3d4a5a;padding:10px}
-select{background:#0b1118;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 10px;font-size:13px;max-width:55%}
-.hint{font-size:11px;color:var(--dim);margin-top:8px;min-height:14px;text-align:center}
+.row span{color:var(--dim);flex:0 0 auto}
+.row b{font-variant-numeric:tabular-nums;text-align:right;min-width:0;word-break:break-all}
+
+/* 档位配置：字段卡式（标签 / 控件 / 说明） */
+.field{padding:10px 0;border-bottom:1px dashed var(--line)}
+.field:last-of-type{border-bottom:none}
+.flabel{display:block;font-size:13px;color:var(--dim);margin-bottom:6px}
+.fdesc{font-size:11px;color:var(--dim);margin-top:6px}
+
+select,input[type=text]{
+  /* v2.2.9：原来 calc(var(--glassA) + .25) → glassA=0（玻璃 100%）时仍残留 25% 白底。
+     改为 var(--glassA-strong)（= glassA*1.5，上限 1）：glassA=0.5 时 0.75 与旧观感一致，0 时真正全透。 */
+  background:rgba(var(--glass-rgb), var(--glassA-strong));
+  border:1px solid var(--line);color:var(--txt);
+  border-radius:8px;padding:9px 10px;font-size:15px;width:100%;min-width:0;
+}
+select{-webkit-appearance:none;appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--dim) 50%),linear-gradient(135deg,var(--dim) 50%,transparent 50%);
+  background-position:calc(100% - 16px) 17px,calc(100% - 11px) 17px;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;
+  padding-right:32px;
+}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:28px;
+  background:transparent;border:none;padding:0;
+}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:var(--line)}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;
+  background:var(--acc);border:2px solid var(--bg);margin-top:-7px;
+}
+input[type=range]::-moz-range-track{height:6px;border-radius:99px;background:var(--line)}
+input[type=range]::-moz-range-thumb{width:18px;height:18px;border:2px solid var(--bg);border-radius:50%;background:var(--acc)}
+
+.btn{
+  width:100%;padding:11px;border-radius:10px;border:1px solid var(--acc);
+  background:var(--acc);color:#fff;font-size:14px;font-weight:600;
+  cursor:pointer;margin:10px 0 0;transition:transform .08s,opacity .15s;
+}
+:root[data-theme="dark"] .btn{background:linear-gradient(135deg,#0c3f37,#0b2c46);color:var(--acc);border-color:#155e52}
+.btn:active{transform:scale(.985);opacity:.88}
+.btn[disabled]{opacity:.55;cursor:default;transform:none}
+.btn.ghost{background:transparent;color:var(--txt);border-color:var(--line);font-weight:500}
+:root[data-theme="dark"] .btn.ghost{background:transparent;color:var(--txt)}
+
+.mini{
+  padding:6px 12px;font-size:12px;border-radius:8px;border:1px solid var(--line);
+  background:transparent;color:var(--acc);cursor:pointer;margin-top:8px;
+}
+.loghead{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
+.loghead .mini{margin-top:0}
+.logview{
+  /* v2.2.9：原来 calc(var(--glassA) + .18) → glassA=0 时仍残留 18% 白底 */
+  background:rgba(var(--glass-rgb), var(--glassA-soft));
+  border:1px solid var(--line);border-radius:10px;
+  padding:10px;font:11px/1.6 monospace;color:var(--logfg);
+  max-height:300px;overflow:auto;margin-top:10px;
+  white-space:pre-wrap;word-break:break-all;
+}
+footer{text-align:center;font-size:11px;color:var(--dim);padding:10px 0 4px}
+.hint{font-size:11px;color:var(--dim);margin-top:8px;min-height:14px;line-height:1.5;word-break:break-all}
+.hint.bad{color:var(--badfg)}
+
+/* 提示条：KSU 通道下不出现「浏览器模式」条 */
+.modebar{padding:8px;font-size:12px;text-align:center;border-radius:8px;margin-bottom:10px}
+.modebar.browser{background:var(--okbg);color:var(--okfg)}
+
+/* 壁纸卡内部 */
+.wallrow{display:flex;gap:8px;flex-wrap:wrap}
+.wallrow .btn{flex:1 1 140px;margin-top:0}
+.wallrow{margin-top:10px}
+.walllist{max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px}
+.wallitem{
+  display:flex;justify-content:space-between;gap:8px;align-items:center;
+  padding:8px 10px;font-size:12px;border-bottom:1px solid var(--line);
+  cursor:pointer;word-break:break-all;
+}
+.wallitem:last-child{border-bottom:none}
+.wallitem:active{background:var(--line)}
+.wallitem i{font-style:normal;color:var(--dim);font-size:11px;flex:0 0 auto}
+.wallprog{font-size:12px;color:var(--acc);margin-top:8px}
+
+/* 液态玻璃浮动按钮组：3 枚独立按钮，各自玻璃底衬，彼此不共用 */
+#bottomBar{
+  position:fixed;left:0;right:0;bottom:0;z-index:50;
+  display:flex;justify-content:center;align-items:flex-end;
+  gap:14px;                       /* 按钮之间留明显间距 */
+  padding:0 14px calc(10px + env(safe-area-inset-bottom));
+  background:transparent;         /* 去掉整条底衬 → 不再「连在一起」 */
+  border-top:none;box-shadow:none;
+  pointer-events:none;            /* 空隙不挡点击 */
+}
+#bottomBar .fab{
+  pointer-events:auto;
+  min-width:64px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  padding:9px 10px;border-radius:18px;
+  color:var(--txt);font-size:11px;cursor:pointer;
+  /* 每枚按钮自带玻璃：alpha 由「玻璃透明度」滑杆统一驱动 + 更强模糊 + 内高光 + 外投影 */
+  background:rgba(var(--glass-rgb), var(--glassA));
+  -webkit-backdrop-filter:blur(var(--glassBlur,24px)) saturate(180%);
+          backdrop-filter:blur(var(--glassBlur,24px)) saturate(180%);
+  border:1px solid var(--glass-brd);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.35), 0 8px 24px rgba(0,0,0,.16);
+  -webkit-tap-highlight-color:transparent;
+  transition:transform .08s,opacity .15s;
+}
+#bottomBar .fab:active{transform:scale(.94);opacity:.75}
+/* 当前分页高亮（首页 / 壁纸） */
+#bottomBar .fab.active{border-color:var(--acc);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 8px 24px rgba(0,0,0,.16),0 0 0 1px var(--acc)}
+#bottomBar .fab.active .navlabel{color:var(--acc);font-weight:600}
+.navicon{font-size:17px;line-height:1.1}
+.navlabel{font-size:10px;color:var(--dim)}
+/* backdrop-filter 不支持时退化为半透明纯色，保证文字可读 */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  #bottomBar .fab{background:var(--card)}
+}
+
+/* 手机 <600px：单列，不得横向滚动 */
+@media (max-width:479px){
+  .row b{font-size:12px}
+}
+
+/* 平板 >=600px：两栏（状态左 / 配置与壁纸右 / 日志跨栏） */
+@media (min-width:600px){
+  #app{max-width:900px;padding-left:18px;padding-right:18px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+  .grid .card{margin-bottom:0}
+  .col-span-2{grid-column:1/-1}
+  .field{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;align-items:center}
+  .field .flabel{margin-bottom:0}
+  .field .fdesc{grid-column:2;margin-top:2px}
+  .field .mini{margin-top:0;grid-column:2;justify-self:start}
+  .field .walllist{grid-column:1/-1}
+  .wallrow .btn{flex:1 1 0}
+  h1{font-size:19px}
+}
+
+/* ===================== 分页容器（v2.2.8） =====================
+   首页 #page-home / 壁纸 #page-wall，同一时刻只显示一个（.active）。
+   切换由底部导航触发：location.hash = #home / #wall（系统返回键天然回首页）。 */
+.page{display:none}
+.page.active{display:block}
+
+/* 壁纸分页：比首页略窄，居中；沿用玻璃变量 */
+#wallApp{
+  max-width:480px;margin:0 auto;
+  padding:12px 14px calc(80px + env(safe-area-inset-bottom) + 12px);
+}
+.wp-head{
+  display:flex;align-items:center;gap:10px;
+  padding:6px 2px 12px;
+}
+.wp-head h2{font-size:17px;font-weight:600;margin:0;flex:1 1 auto;min-width:0}
+.wp-back{
+  flex:0 0 auto;
+  display:flex;align-items:center;gap:2px;
+  padding:7px 12px;border-radius:99px;
+  border:1px solid var(--line);
+  background:rgba(var(--glass-rgb), var(--glassA));
+  -webkit-backdrop-filter:blur(var(--glassBlur,24px)) saturate(160%);
+          backdrop-filter:blur(var(--glassBlur,24px)) saturate(160%);
+  color:var(--txt);font-size:13px;cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+  transition:transform .08s,opacity .15s;
+}
+.wp-back:active{transform:scale(.95);opacity:.8}
+
+/* 壁纸分页在平板下也保持单列居中（滑杆满宽更好拖） */
+@media (min-width:600px){
+  #wallApp{max-width:560px;padding-left:18px;padding-right:18px}
+  .wp-head h2{font-size:19px}
+}

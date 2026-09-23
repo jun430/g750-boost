@@ -1,49 +1,145 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>G750 Boost</title>
-<link rel="stylesheet" href="style.css">
+<script>
+/* 首屏防闪：必须在样式表之前同步执行，先定 data-theme 再渲染 */
+(function(){
+  try{
+    var t = localStorage.getItem("gb_theme") || "light";   /* 默认 light（白底黑字） */
+    if (t !== "light" && t !== "dark" && t !== "auto") t = "light";
+    document.documentElement.dataset.theme = t;
+  }catch(e){ document.documentElement.dataset.theme = "light"; }
+})();
+</script>
+<link rel="stylesheet" href="style.css?v=2.2.11">
 </head>
 <body>
-<div id="app">
-  <header><h1>G750 <b>Boost</b></h1><span class="badge" id="sBadge">GPU Floor</span></header>
-  <div class="card status">
-    <div class="row"><span>平台</span><b id="sPlatform">--</b></div>
-    <div class="row"><span>配置目标</span><b id="sCfgFloor">-- MHz</b></div>
-    <div class="row"><span>当前生效</span><b id="sFloor">-- MHz</b></div>
-    <div class="row"><span>硬件实际</span><b id="sLiveFloor">-- MHz</b></div>
-    <div class="row"><span>地板档位</span><b id="sFloorLvl">--</b></div>
-    <div class="row"><span>目标上限</span><b id="sCeil">-- MHz</b></div>
-    <div class="row"><span>当前频率</span><b id="sCur">-- MHz</b></div>
-    <div class="row"><span>实际上限</span><b id="sMax">-- MHz</b></div>
-    <div class="row"><span>游戏状态</span><b id="sGame">--</b></div>
-    <div class="row"><span>温度</span><b id="sTemp">-- °C</b></div>
-  </div>
-  <div class="card">
-    <div class="loghead"><span>档位设置</span></div>
-    <div class="row" style="border:none">
-      <span>地板频率</span>
-      <select id="selFloor"></select>
+
+<!-- ===================== 分页 1 / 首页：状态 + 档位配置 + 日志（v2.2.8） ===================== -->
+<div id="page-home" class="page active">
+  <div id="app">
+    <header><h1>G750 <b>Boost</b></h1><span class="badge" id="sBadge">GPU Floor</span></header>
+
+    <div class="grid">
+
+      <!-- 左栏（平板）：状态卡，10 个字段原样保留 -->
+      <div class="card status">
+        <div class="row"><span>平台</span><b id="sPlatform">--</b></div>
+        <div class="row"><span>配置目标</span><b id="sCfgFloor">-- MHz</b></div>
+        <div class="row"><span>当前生效</span><b id="sFloor">-- MHz</b></div>
+        <div class="row"><span>硬件实际</span><b id="sLiveFloor">-- MHz</b></div>
+        <div class="row"><span>地板档位</span><b id="sFloorLvl">--</b></div>
+        <div class="row"><span>目标上限</span><b id="sCeil">-- MHz</b></div>
+        <div class="row"><span>当前频率</span><b id="sCur">-- MHz</b></div>
+        <div class="row"><span>实际上限</span><b id="sMax">-- MHz</b></div>
+        <div class="row"><span>游戏状态</span><b id="sGame">--</b></div>
+        <div class="row"><span>温度</span><b id="sTemp">-- °C</b></div>
+      </div>
+
+      <!-- 右栏（平板）：档位配置卡，字段卡式重排 -->
+      <div class="card">
+        <div class="loghead"><span>档位配置</span></div>
+        <div class="field">
+          <label class="flabel" for="selFloor">地板频率 (下限)</label>
+          <select id="selFloor"></select>
+          <div class="fdesc">游戏运行时的最低频率下限</div>
+        </div>
+        <div class="field">
+          <label class="flabel" for="selCeil">上限频率 (封顶)</label>
+          <select id="selCeil"></select>
+          <div class="fdesc">防止被拉低，不主动限制上调</div>
+        </div>
+        <button id="btnSave" class="btn">保存档位</button>
+        <div class="hint" id="saveHint"></div>
+      </div>
+
+      <!-- 跨两栏（平板）：日志卡 -->
+      <div class="card col-span-2">
+        <div class="loghead">
+          <span>运行日志</span>
+          <button id="btnLog" class="mini">刷新日志</button>
+        </div>
+        <pre id="logView" class="logview">加载中...</pre>
+      </div>
+
     </div>
-    <div class="row" style="border:none">
-      <span>上限频率</span>
-      <select id="selCeil"></select>
-    </div>
-    <button id="btnSave" class="btn">保存档位</button>
-    <div class="hint" id="saveHint"></div>
+
+    <footer>G750 Boost v2.2.11 · 地板档位接管 · 三平台自适配 · 配置目标与生效值分离 · 服务自愈守护 · shell 兼容修复 · 液态玻璃 WebUI / 相册壁纸 / 分页导航</footer>
   </div>
-  <button id="btnRefresh" class="btn">刷新状态</button>
-  <div class="card">
-    <div class="loghead">
-      <span>运行日志</span>
-      <button id="btnLog" class="mini">刷新日志</button>
-    </div>
-    <pre id="logView" class="logview">加载中...</pre>
-  </div>
-  <footer>G750 Boost v2.1.6 · 地板档位接管 · 三平台自适配 · 配置目标与生效值分离 · 服务自愈守护 · shell 兼容修复</footer>
 </div>
-<script src="main.js"></script>
+
+<!-- ===================== 分页 2 / 壁纸设置（v2.2.8） =====================
+     独立分页：从底部导航「壁纸」进入，整页切换（非弹层）。
+     控件 id 与旧版完全一致，main.js 的事件绑定无需改动。 -->
+<div id="page-wall" class="page">
+  <div id="wallApp">
+    <div class="wp-head">
+      <button class="wp-back" id="btnWallBack" type="button" aria-label="返回首页">‹ 返回</button>
+      <h2>壁纸设置</h2>
+      <span class="tag" id="wallTag">未设置</span>
+    </div>
+
+    <!-- 主通道：系统相册 / 文件管理器
+         ⚠ 必须用 CSS 视觉隐藏，不能用 hidden 属性（display:none 会让部分 WebView 的 click() 唤不起 file chooser） -->
+    <input type="file" id="wallPick" accept="image/*" class="filehide">
+    <div class="wallrow">
+      <button class="btn" id="btnWallPick">选择壁纸</button>
+      <button class="btn ghost" id="btnWallClear">清除壁纸</button>
+    </div>
+
+    <!-- 三个滑杆：壁纸透明度 / 玻璃透明度 / 玻璃模糊 -->
+    <div class="card">
+      <div class="field">
+        <label class="flabel" for="wallOpacity">壁纸透明度</label>
+        <input type="range" id="wallOpacity" min="0" max="100" step="5" value="35">
+        <div class="fdesc" id="wallOpacityHint">35%</div>
+      </div>
+
+      <!-- 液态玻璃透明度：值越高越透（wall_glass） -->
+      <div class="field">
+        <label class="flabel" for="glassOpacity">玻璃透明度</label>
+        <input type="range" id="glassOpacity" min="0" max="100" step="5" value="50">
+        <div class="fdesc" id="glassHint">50%（越高越透，100% 全透）</div>
+      </div>
+
+      <!-- 玻璃模糊：影响底部浮动按钮的磨砂强度（wall_blur） -->
+      <div class="field">
+        <label class="flabel" for="glassBlur">玻璃模糊</label>
+        <input type="range" id="glassBlur" min="0" max="40" step="1" value="24">
+        <div class="fdesc" id="blurHint">24px（0 = 无模糊）</div>
+      </div>
+    </div>
+
+    <div class="wallprog" id="wallProgWrap" hidden>写入中 <b id="wallProg">0%</b></div>
+
+    <div class="hint" id="wallHint"></div>
+  </div>
+</div>
+
+<!-- 液态玻璃底部分页导航：4 枚独立按钮（首页 / 壁纸 / 刷新 / 主题）
+     首页·壁纸为分页切换（当前页高亮），刷新·主题为动作按钮 -->
+<div id="bottomBar">
+  <button class="fab" id="btnNavHome" type="button" aria-label="首页">
+    <span class="navicon">⌂</span>
+    <span class="navlabel">首页</span>
+  </button>
+  <button class="fab" id="btnNavWall" type="button" aria-label="壁纸设置">
+    <span class="navicon">▧</span>
+    <span class="navlabel">壁纸</span>
+  </button>
+  <button class="fab" id="btnRefresh" type="button" aria-label="刷新状态">
+    <span class="navicon">↻</span>
+    <span class="navlabel">刷新</span>
+  </button>
+  <button class="fab" id="btnTheme" type="button" aria-label="切换主题">
+    <span class="navicon" id="themeIcon">☀</span>
+    <span class="navlabel" id="themeLabel">日间</span>
+  </button>
+</div>
+
+<script src="main.js?v=2.2.11"></script>
 </body>
 </html>

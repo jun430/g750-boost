@@ -1,6 +1,10 @@
 #!/system/bin/sh
-# G750 Boost webdaemon v2.0.0 - 极简 HTTP（8778 端口）
+# G750 Boost webdaemon v3.0.0 - 极简 HTTP（8778 端口）
 # v2.0.0: 统一调用 cgi/ 脚本（status/config/log），减少重复实现
+# v3.0.0: 新增壁纸路由 /cgi-bin/wall.sh/<op>[/<arg>] 与二进制 /wallpaper.jpg
+#         并将 Content-Length 由字符数改为字节数（wc -c），修正中文截断
+#   ⚠ 本脚本每次启动都会用 heredoc 重写 .whandler.sh，
+#     因此路由改动必须【同时】落在本文件与 .whandler.sh，否则重启即回滚。
 MODDIR=/data/adb/modules/g750-boost
 [ -d "$MODDIR" ] || MODDIR=/data/adb/modules_update/g750-boost
 LOG=$MODDIR/boost.log
@@ -25,11 +29,18 @@ MODDIR=/data/adb/modules/g750-boost
 [ -d "$MODDIR" ] || MODDIR=/data/adb/modules_update/g750-boost
 reqline=$(head -n 1)
 path=$(printf '%s' "$reqline" | awk '{print $2}')
-resp() { printf 'HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$1" "${#2}" "$2"; }
+# Content-Length 按【字节】计算（wc -c）：log/list 等含中文时若按字符数会偏小，
+# 浏览器按 Content-Length 截断 → JSON/日志被截断。禁止用 ${#body}。
+resp() {
+  _b="$2"
+  _n=$(printf '%s' "$_b" | wc -c 2>/dev/null | tr -d ' \r\n')
+  [ -n "$_n" ] || _n=0
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n%s' "$1" "$_n" "$_b"
+}
 case "$path" in
-  /|/index.html) body=$(cat "$MODDIR/webroot/index.html" 2>/dev/null); resp "text/html; charset=utf-8" "$body" ;;
-  /main.js)      body=$(cat "$MODDIR/webroot/main.js" 2>/dev/null);      resp "application/javascript" "$body" ;;
-  /style.css)    body=$(cat "$MODDIR/webroot/style.css" 2>/dev/null);    resp "text/css" "$body" ;;
+  /|/index.html|/index.html?*|/'?'*) body=$(cat "$MODDIR/webroot/index.html" 2>/dev/null); resp "text/html; charset=utf-8" "$body" ;;
+  /main.js|/main.js?*)      body=$(cat "$MODDIR/webroot/main.js" 2>/dev/null);      resp "application/javascript" "$body" ;;
+  /style.css|/style.css?*)    body=$(cat "$MODDIR/webroot/style.css" 2>/dev/null);    resp "text/css" "$body" ;;
   /cgi-bin/status.sh)
     body=$(sh "$MODDIR/cgi/status.sh" 2>/dev/null)
     resp "application/json" "$body" ;;
@@ -41,7 +52,24 @@ case "$path" in
   /cgi-bin/log.sh)
     body=$(sh "$MODDIR/cgi/log.sh" 2>/dev/null)
     resp "text/plain; charset=utf-8" "$body" ;;
-  *) printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n' ;;
+  /cgi-bin/wall.sh*)
+    _pi="${path#/cgi-bin/wall.sh}"
+    _pi="${_pi#/}"
+    _op="${_pi%%/*}"
+    _arg="${_pi#*/}"
+    [ "$_arg" = "$_pi" ] && _arg=""
+    body=$(sh "$MODDIR/cgi/wall.sh" "$_op" "$_arg" 2>/dev/null)
+    resp "text/plain; charset=utf-8" "$body" ;;
+  /wallpaper.jpg*)
+    _wp="$MODDIR/webroot/bg/wall.jpg"
+    if [ -f "$_wp" ]; then
+      _sz=$(wc -c < "$_wp" 2>/dev/null | tr -d ' \r\n')
+      printf 'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n' "$_sz"
+      cat "$_wp"
+    else
+      printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+    fi ;;
+  *) printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' ;;
 esac
 HEOF
 chmod 755 "$MODDIR/.whandler.sh"
@@ -72,6 +100,6 @@ chmod 755 "$MODDIR/.whandler.sh"
 ) &
 
 while :; do
-  "$BB" nc -l -p 8778 -e "$MODDIR/.whandler.sh" 2>/dev/null
+  "$BB" nc -lk -p 8778 -e "$MODDIR/.whandler.sh" 2>/dev/null
   sleep 0.1
 done

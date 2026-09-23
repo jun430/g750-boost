@@ -169,6 +169,11 @@ set_perm "$MODPATH/webdaemon.sh" 0 0 0755
 set_perm "$MODPATH/cgi/status.sh" 0 0 0755
 set_perm "$MODPATH/cgi/log.sh" 0 0 0755
 set_perm "$MODPATH/cgi/config.sh" 0 0 0755
+set_perm "$MODPATH/cgi/wall.sh" 0 0 0755
+
+# 壁纸目录（存放 wall.jpg）与路由 handler
+mkdir -p "$MODPATH/webroot/bg" 2>/dev/null
+set_perm "$MODPATH/.whandler.sh" 0 0 0755 2>/dev/null
 
 ui_print " "
 ui_print "=== 安装完成 ==="
